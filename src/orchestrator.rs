@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use tracing::{debug, info, warn};
 
@@ -147,7 +147,7 @@ impl DefaultChatOrchestrator {
                 .model
                 .complete(ModelRequest {
                     system_prompt: format!(
-                        "You are CompanionPilot. Use the provided search output to answer the user's request precisely. If citations are provided, keep your answer concise and factual.\n{}",
+                        "You are CompanionPilot. Use the provided search output to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
                         build_recent_context_block(&memory_context.recent_messages)
                     ),
                     user_prompt: format!(
@@ -304,7 +304,7 @@ impl DefaultChatOrchestrator {
                 let query_word_count = query.split_whitespace().count();
                 if normalized_query == normalized_input && query_word_count > 7 {
                     return SearchDecision::Use {
-                        query: fallback_search_query(user_input),
+                        query: fallback_search_query_with_context(user_input, memory),
                         source: "planner_refined",
                     };
                 }
@@ -416,8 +416,8 @@ impl DefaultChatOrchestrator {
                 "skip_search",
                 *reason,
                 json!({}),
-                !reason.starts_with("planner_"),
-                if reason.starts_with("planner_") {
+                !matches!(*reason, "planner_model_error" | "planner_parse_error"),
+                if matches!(*reason, "planner_model_error" | "planner_parse_error") {
                     Some((*reason).to_owned())
                 } else {
                     None
@@ -503,12 +503,14 @@ Return strict JSON with no markdown:
 Set query to empty string when use_search is false.
 {}
 Rules:
-- If the user explicitly asks to search, find, look up, browse, compare options, or discover similar projects/tools, set use_search=true.
+- If the user explicitly asks to search, google, find, look up, browse, compare options, or discover similar projects/tools, set use_search=true.
+- If the user asks for results from \"the web\", \"internet\", or says \"just google it\", set use_search=true.
 - If the user asks for recommendations that depend on currently available options, set use_search=true.
 - Use search for time-sensitive, latest/current, news, prices, weather, or unknown factual claims.
 - Do not use search for casual conversation or personal memory recall.
 - Keep query concise and retrieval-oriented (3-12 words), avoiding filler words.
 Examples:
+- User: \"Just google it.\" -> {{\"use_search\":true,\"query\":\"query based on user's last request\"}}
 - User: \"Search for some similar AI project like the one I am building.\" -> {{\"use_search\":true,\"query\":\"similar AI companion orchestrator projects\"}}
 - User: \"Find alternatives to Tavily for AI search.\" -> {{\"use_search\":true,\"query\":\"Tavily alternatives AI search API\"}}
 - User: \"What did I just tell you?\" -> {{\"use_search\":false,\"query\":\"\"}}",
@@ -523,13 +525,7 @@ struct SearchPlan {
 }
 
 fn parse_planner_output(raw: &str) -> Result<SearchPlan, serde_json::Error> {
-    let candidate = raw
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    serde_json::from_str::<SearchPlan>(candidate)
+    parse_json_plan(raw)
 }
 
 fn truncate_for_log(input: &str, max_len: usize) -> String {
@@ -577,13 +573,72 @@ struct MemoryPlan {
 }
 
 fn parse_memory_plan(raw: &str) -> Result<MemoryPlan, serde_json::Error> {
+    parse_json_plan(raw)
+}
+
+fn parse_json_plan<T: DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     let candidate = raw
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    serde_json::from_str::<MemoryPlan>(candidate)
+
+    match serde_json::from_str::<T>(candidate) {
+        Ok(plan) => Ok(plan),
+        Err(original_error) => {
+            if let Some(object_candidate) = extract_first_json_object(candidate) {
+                serde_json::from_str::<T>(object_candidate).map_err(|_| original_error)
+            } else {
+                Err(original_error)
+            }
+        }
+    }
+}
+
+fn extract_first_json_object(raw: &str) -> Option<&str> {
+    let mut start_index: Option<usize> = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut is_escaped = false;
+
+    for (index, character) in raw.char_indices() {
+        if start_index.is_none() {
+            if character == '{' {
+                start_index = Some(index);
+                depth = 1;
+            }
+            continue;
+        }
+
+        if in_string {
+            if is_escaped {
+                is_escaped = false;
+                continue;
+            }
+            match character {
+                '\\' => is_escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let start = start_index?;
+                    return Some(&raw[start..=index]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn sanitize_memory_key(raw: &str) -> String {
@@ -636,6 +691,48 @@ fn fallback_search_query(input: &str) -> String {
     tokens.join(" ")
 }
 
+fn fallback_search_query_with_context(input: &str, memory: &crate::types::MemoryContext) -> String {
+    let direct_query = fallback_search_query(input);
+    if !is_generic_search_query(&direct_query) {
+        return direct_query;
+    }
+
+    let normalized_input = normalize_for_compare(input);
+    for line in memory.recent_messages.iter().rev() {
+        let Some(previous_user_message) = line.strip_prefix("user: ").map(str::trim) else {
+            continue;
+        };
+        if normalize_for_compare(previous_user_message) == normalized_input {
+            continue;
+        }
+        let candidate = fallback_search_query(previous_user_message);
+        if !is_generic_search_query(&candidate) {
+            return candidate;
+        }
+    }
+
+    direct_query
+}
+
+fn is_generic_search_query(query: &str) -> bool {
+    let normalized = normalize_for_compare(query);
+    if normalized.is_empty() {
+        return true;
+    }
+
+    const GENERIC_TOKENS: &[&str] = &[
+        "search", "google", "find", "look", "lookup", "web", "internet", "it", "this", "that",
+        "just",
+    ];
+
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return true;
+    }
+
+    tokens.len() <= 2 && tokens.iter().all(|token| GENERIC_TOKENS.contains(token))
+}
+
 fn normalize_for_compare(value: &str) -> String {
     value
         .chars()
@@ -656,6 +753,7 @@ fn build_system_prompt(memory: &crate::types::MemoryContext) -> String {
     let mut sections = vec![
         "You are CompanionPilot, a helpful Discord AI companion.".to_owned(),
         "Keep replies concise and practical.".to_owned(),
+        "Never emit XML/JSON/pseudo tool-call markup in normal replies.".to_owned(),
     ];
 
     if let Some(summary) = &memory.summary {
@@ -720,11 +818,12 @@ mod tests {
         model::MockModelProvider,
         safety::SafetyPolicy,
         tools::ToolRegistry,
-        types::MessageCtx,
+        types::{MemoryContext, MessageCtx},
     };
 
     use super::{
-        DefaultChatOrchestrator, clean_memory_value, fallback_search_query, normalize_for_compare,
+        DefaultChatOrchestrator, clean_memory_value, fallback_search_query,
+        fallback_search_query_with_context, normalize_for_compare, parse_planner_output,
         sanitize_memory_key,
     };
 
@@ -911,5 +1010,29 @@ mod tests {
     #[test]
     fn clean_memory_value_trims_wrappers() {
         assert_eq!(clean_memory_value("\"Petr.\""), "Petr");
+    }
+
+    #[test]
+    fn parse_search_plan_from_wrapped_json() {
+        let raw =
+            "Use this decision:\n{\"use_search\":true,\"query\":\"rust release date\"}\nDone.";
+        let plan = parse_planner_output(raw).expect("wrapped JSON should parse");
+        assert!(plan.use_search);
+        assert_eq!(plan.query, "rust release date");
+    }
+
+    #[test]
+    fn context_fallback_uses_previous_user_turn_for_generic_command() {
+        let memory = MemoryContext {
+            summary: None,
+            recent_messages: vec![
+                "user: Search for similar ai companion projects in Rust".to_owned(),
+                "assistant: Sure, I can do that.".to_owned(),
+            ],
+            facts: Vec::new(),
+        };
+
+        let query = fallback_search_query_with_context("Just google it.", &memory);
+        assert_eq!(query, "similar ai companion projects in rust");
     }
 }
