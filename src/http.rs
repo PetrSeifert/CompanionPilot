@@ -46,6 +46,13 @@ struct DashboardChatRequest {
     channel_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpsertFactRequest {
+    key: String,
+    value: String,
+    confidence: Option<f32>,
+}
+
 fn default_guild() -> String {
     "local".to_owned()
 }
@@ -70,7 +77,23 @@ pub fn router(state: AppState) -> Router {
         .route("/chat", post(chat))
         .route("/api/dashboard/users", get(list_users))
         .route("/api/dashboard/users/{user_id}/facts", get(list_user_facts))
+        .route(
+            "/api/dashboard/users/{user_id}/facts",
+            post(upsert_user_fact),
+        )
+        .route(
+            "/api/dashboard/users/{user_id}/facts/{key}",
+            axum::routing::delete(delete_user_fact),
+        )
         .route("/api/dashboard/users/{user_id}/chats", get(list_user_chats))
+        .route(
+            "/api/dashboard/users/{user_id}/chats",
+            axum::routing::delete(clear_user_chats),
+        )
+        .route(
+            "/api/dashboard/users/{user_id}/chats/{message_id}",
+            axum::routing::delete(delete_user_chat_message),
+        )
         .route(
             "/api/dashboard/users/{user_id}/toolcalls",
             get(list_user_tool_calls),
@@ -148,6 +171,52 @@ async fn list_user_facts(
     Ok(Json(facts))
 }
 
+async fn upsert_user_fact(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Json(request): Json<UpsertFactRequest>,
+) -> Result<Json<crate::types::MemoryFact>, (axum::http::StatusCode, String)> {
+    let key = request.key.trim().to_lowercase();
+    let value = request.value.trim().to_owned();
+    if key.is_empty() || value.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "key and value must be non-empty".to_owned(),
+        ));
+    }
+
+    let fact = crate::types::MemoryFact {
+        key,
+        value,
+        confidence: request.confidence.unwrap_or(0.95).clamp(0.0, 1.0),
+        source: "dashboard_manual".to_owned(),
+        updated_at: Utc::now(),
+    };
+
+    state
+        .memory
+        .upsert_fact(&user_id, fact.clone())
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(fact))
+}
+
+async fn delete_user_fact(
+    State(state): State<AppState>,
+    Path((user_id, key)): Path<(String, String)>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let deleted = state
+        .memory
+        .delete_fact(&user_id, &key)
+        .await
+        .map_err(internal_error)?;
+    Ok(if deleted {
+        axum::http::StatusCode::NO_CONTENT
+    } else {
+        axum::http::StatusCode::NOT_FOUND
+    })
+}
+
 async fn list_user_chats(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -160,6 +229,34 @@ async fn list_user_chats(
         .await
         .map_err(internal_error)?;
     Ok(Json(messages))
+}
+
+async fn delete_user_chat_message(
+    State(state): State<AppState>,
+    Path((user_id, message_id)): Path<(String, String)>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let deleted = state
+        .memory
+        .delete_chat_message(&user_id, &message_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(if deleted {
+        axum::http::StatusCode::NO_CONTENT
+    } else {
+        axum::http::StatusCode::NOT_FOUND
+    })
+}
+
+async fn clear_user_chats(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let deleted = state
+        .memory
+        .clear_chat_messages(&user_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 async fn list_user_tool_calls(
@@ -379,14 +476,37 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       padding: 10px 12px;
       margin-bottom: 10px;
     }
+    .fact-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
     .fact-key {
       color: var(--accent);
       font-weight: 700;
       font-size: .9rem;
-      margin-bottom: 3px;
     }
     .fact-val { font-size: .9rem; }
     .fact-meta { color: var(--muted); font-size: .78rem; margin-top: 6px; }
+    .fact-form {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(140,180,210,.18);
+      background: rgba(14, 32, 46, .65);
+    }
+    .fact-form input {
+      background: rgba(8, 19, 29, .9);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 9px;
+      min-width: 0;
+      font-size: .82rem;
+    }
 
     .tool-call {
       background: var(--panel-bright);
@@ -477,8 +597,13 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       display: flex;
     }
     .chat-row.user { justify-content: flex-end; }
-    .bubble {
+    .chat-row.assistant { justify-content: flex-start; }
+    .chat-content {
       max-width: 86%;
+      display: grid;
+      gap: 4px;
+    }
+    .bubble {
       border-radius: 14px;
       padding: 10px 12px;
       font-size: .9rem;
@@ -523,6 +648,11 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       justify-content: space-between;
       gap: 10px;
     }
+    .composer-buttons {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
     .send-status {
       font-size: .82rem;
       color: var(--muted);
@@ -556,6 +686,25 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       font-weight: 700;
     }
     button:hover { filter: brightness(1.1); }
+    .tiny-btn {
+      padding: 4px 8px;
+      font-size: .74rem;
+      border-radius: 8px;
+      border: 1px solid rgba(140,180,210,.35);
+      background: rgba(20, 42, 59, .85);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .tiny-btn.danger {
+      border-color: rgba(255,111,125,.45);
+      background: rgba(73, 26, 34, .75);
+      color: #ffd8dc;
+    }
+    .tiny-btn.warn {
+      border-color: rgba(255,202,96,.55);
+      background: rgba(77, 56, 18, .76);
+      color: #ffe4a8;
+    }
 
     .empty {
       padding: 16px;
@@ -593,7 +742,10 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         <div class="composer">
           <textarea id="prompt" placeholder="Send a test message as selected user..."></textarea>
           <div class="composer-actions">
-            <button id="send">Send to CompanionPilot</button>
+            <div class="composer-buttons">
+              <button id="send">Send to CompanionPilot</button>
+              <button id="clear-chat" class="tiny-btn warn">Clear Conversation</button>
+            </div>
             <div id="send-status" class="send-status">Ready</div>
           </div>
           <div id="chat-error" class="error"></div>
@@ -605,6 +757,11 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         <div class="stack">
           <div>
             <h3 class="subpanel-title">Memory Facts</h3>
+            <div class="fact-form">
+              <input id="fact-key" placeholder="key (e.g. name)" />
+              <input id="fact-value" placeholder="value" />
+              <button id="fact-save" class="tiny-btn">Save Fact</button>
+            </div>
             <div id="facts" class="memory-list"></div>
           </div>
           <div>
@@ -628,9 +785,13 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     const chatEl = document.getElementById("chat");
     const statusEl = document.getElementById("status");
     const sendBtn = document.getElementById("send");
+    const clearChatBtn = document.getElementById("clear-chat");
     const promptEl = document.getElementById("prompt");
     const sendStatusEl = document.getElementById("send-status");
     const chatErrorEl = document.getElementById("chat-error");
+    const factKeyEl = document.getElementById("fact-key");
+    const factValueEl = document.getElementById("fact-value");
+    const factSaveBtn = document.getElementById("fact-save");
     let selectedUser = null;
     let isSending = false;
     let pendingBubbleId = null;
@@ -669,6 +830,12 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         </details>
       `;
     };
+
+    async function expectOk(resp) {
+      if (resp.ok) return;
+      const text = await resp.text();
+      throw new Error(text || `request failed (${resp.status})`);
+    }
 
     function setSendingState(sending) {
       isSending = sending;
@@ -767,7 +934,10 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       factsEl.innerHTML = facts.length
         ? facts.map((f) => `
             <div class="fact">
-              <div class="fact-key">${escapeHtml(f.key)}</div>
+              <div class="fact-head">
+                <div class="fact-key">${escapeHtml(f.key)}</div>
+                <button class="tiny-btn danger" onclick="deleteFact('${encodeURIComponent(f.key)}')">Delete</button>
+              </div>
               <div class="fact-val">${escapeHtml(f.value)}</div>
               <div class="fact-meta">confidence=${f.confidence.toFixed(2)} • ${fmtDate(f.updated_at)}</div>
             </div>
@@ -777,9 +947,14 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       chatEl.innerHTML = chats.length
         ? chats.map((m) => `
             <div class="chat-row ${m.role}">
-              <div class="bubble">
-                ${escapeHtml(m.content)}
-                <small>${m.role} • ${m.guild_id}/${m.channel_id} • ${fmtDate(m.timestamp)}</small>
+              <div class="chat-content">
+                <div class="bubble">
+                  ${escapeHtml(m.content)}
+                  <small>${m.role} • ${m.guild_id}/${m.channel_id} • ${fmtDate(m.timestamp)}</small>
+                </div>
+                <div>
+                  <button class="tiny-btn danger" onclick="deleteChatMessage('${encodeURIComponent(m.id)}')">Delete</button>
+                </div>
               </div>
             </div>
           `).join("")
@@ -842,10 +1017,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ content })
         });
-        if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(text || "request failed");
-        }
+        await expectOk(resp);
         promptEl.value = "";
         removePendingAssistantBubble();
         await renderSelectedUser();
@@ -858,12 +1030,106 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       }
     };
 
+    async function saveFact() {
+      chatErrorEl.textContent = "";
+      if (!selectedUser) {
+        chatErrorEl.textContent = "Select a user first.";
+        return;
+      }
+      const key = factKeyEl.value.trim();
+      const value = factValueEl.value.trim();
+      if (!key || !value) {
+        chatErrorEl.textContent = "Fact key and value are required.";
+        return;
+      }
+
+      factSaveBtn.disabled = true;
+      try {
+        const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/facts`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ key, value, confidence: 0.98 })
+        });
+        await expectOk(resp);
+        factKeyEl.value = "";
+        factValueEl.value = "";
+        await renderSelectedUser();
+      } catch (error) {
+        chatErrorEl.textContent = `Save fact failed: ${error.message || error}`;
+      } finally {
+        factSaveBtn.disabled = false;
+      }
+    }
+
+    async function deleteFact(encodedKey) {
+      if (!selectedUser) return;
+      const key = decodeURIComponent(encodedKey);
+      if (!confirm(`Delete fact '${key}'?`)) return;
+
+      try {
+        const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/facts/${encodeURIComponent(key)}`, {
+          method: "DELETE"
+        });
+        await expectOk(resp);
+        await renderSelectedUser();
+      } catch (error) {
+        chatErrorEl.textContent = `Delete fact failed: ${error.message || error}`;
+      }
+    }
+
+    async function deleteChatMessage(encodedMessageId) {
+      if (!selectedUser) return;
+      const messageId = decodeURIComponent(encodedMessageId);
+      if (!confirm("Delete this conversation message?")) return;
+
+      try {
+        const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/chats/${encodeURIComponent(messageId)}`, {
+          method: "DELETE"
+        });
+        await expectOk(resp);
+        await renderSelectedUser();
+        await loadUsers();
+      } catch (error) {
+        chatErrorEl.textContent = `Delete message failed: ${error.message || error}`;
+      }
+    }
+
+    async function clearConversation() {
+      if (!selectedUser) return;
+      if (!confirm("Clear full conversation history for this user?")) return;
+
+      clearChatBtn.disabled = true;
+      try {
+        const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/chats`, {
+          method: "DELETE"
+        });
+        await expectOk(resp);
+        await renderSelectedUser();
+        await loadUsers();
+      } catch (error) {
+        chatErrorEl.textContent = `Clear conversation failed: ${error.message || error}`;
+      } finally {
+        clearChatBtn.disabled = false;
+      }
+    }
+
+    window.deleteFact = deleteFact;
+    window.deleteChatMessage = deleteChatMessage;
+
     promptEl.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
         event.preventDefault();
         sendBtn.click();
       }
     });
+    factValueEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        saveFact();
+      }
+    });
+    factSaveBtn.addEventListener("click", saveFact);
+    clearChatBtn.addEventListener("click", clearConversation);
 
     (async function bootstrap() {
       await checkHealth();

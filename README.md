@@ -13,6 +13,7 @@ CompanionPilot is a Rust-first AI orchestrator for Discord chat with long/short-
 - Built-in web dashboard at `/app` for users/memory/chats
 - Dashboard now includes tool-call history (query, result/error, source)
 - Dashboard now includes planner decision history (search/memory decisions)
+- Dashboard supports manual memory fact add/update/delete and conversation message deletion/clear
 - Local dev infra (`docker-compose` with Postgres + Redis)
 - Railway deployment entry (`railway.json`)
 

@@ -62,6 +62,7 @@ impl DefaultChatOrchestrator {
             .await?;
         self.memory
             .record_chat_message(ChatMessageRecord {
+                id: ctx.message_id.clone(),
                 user_id: ctx.user_id.clone(),
                 guild_id: ctx.guild_id.clone(),
                 channel_id: ctx.channel_id.clone(),
@@ -167,6 +168,7 @@ impl DefaultChatOrchestrator {
             };
             self.memory
                 .record_chat_message(ChatMessageRecord {
+                    id: format!("{}-assistant", ctx.message_id),
                     user_id: ctx.user_id,
                     guild_id: ctx.guild_id,
                     channel_id: ctx.channel_id,
@@ -246,6 +248,7 @@ impl DefaultChatOrchestrator {
 
         self.memory
             .record_chat_message(ChatMessageRecord {
+                id: format!("{}-assistant", ctx.message_id),
                 user_id: ctx.user_id,
                 guild_id: ctx.guild_id,
                 channel_id: ctx.channel_id,

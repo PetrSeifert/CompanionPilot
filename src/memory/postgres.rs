@@ -109,6 +109,15 @@ impl MemoryStore for PostgresMemoryStore {
         Ok(())
     }
 
+    async fn delete_fact(&self, user_id: &str, key: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM memory_facts WHERE user_id = $1 AND key = $2")
+            .bind(user_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn search_relevant(
         &self,
         user_id: &str,
@@ -201,6 +210,7 @@ impl MemoryStore for PostgresMemoryStore {
         let mut messages = sqlx::query_as::<
             _,
             (
+                i64,
                 String,
                 String,
                 String,
@@ -209,7 +219,7 @@ impl MemoryStore for PostgresMemoryStore {
                 chrono::DateTime<chrono::Utc>,
             ),
         >(
-            "SELECT user_id, guild_id, channel_id, role, content, timestamp
+            "SELECT id, user_id, guild_id, channel_id, role, content, timestamp
              FROM chat_messages
              WHERE user_id = $1
              ORDER BY timestamp DESC
@@ -221,7 +231,8 @@ impl MemoryStore for PostgresMemoryStore {
         .await?
         .into_iter()
         .map(
-            |(user_id, guild_id, channel_id, role, content, timestamp)| ChatMessageRecord {
+            |(id, user_id, guild_id, channel_id, role, content, timestamp)| ChatMessageRecord {
+                id: id.to_string(),
                 user_id,
                 guild_id,
                 channel_id,
@@ -234,6 +245,27 @@ impl MemoryStore for PostgresMemoryStore {
 
         messages.reverse();
         Ok(messages)
+    }
+
+    async fn delete_chat_message(&self, user_id: &str, message_id: &str) -> anyhow::Result<bool> {
+        let id = match message_id.parse::<i64>() {
+            Ok(value) => value,
+            Err(_) => return Ok(false),
+        };
+        let result = sqlx::query("DELETE FROM chat_messages WHERE user_id = $1 AND id = $2")
+            .bind(user_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn clear_chat_messages(&self, user_id: &str) -> anyhow::Result<u64> {
+        let result = sqlx::query("DELETE FROM chat_messages WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>> {

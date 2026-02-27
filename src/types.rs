@@ -67,6 +67,7 @@ impl ChatRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessageRecord {
+    pub id: String,
     pub user_id: String,
     pub guild_id: String,
     pub channel_id: String,

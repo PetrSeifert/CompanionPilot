@@ -31,6 +31,8 @@ pub trait MemoryStore: Send + Sync {
 
     async fn list_facts(&self, user_id: &str, limit: usize) -> anyhow::Result<Vec<MemoryFact>>;
 
+    async fn delete_fact(&self, user_id: &str, key: &str) -> anyhow::Result<bool>;
+
     async fn record_chat_message(&self, message: ChatMessageRecord) -> anyhow::Result<()>;
 
     async fn list_chat_messages(
@@ -38,6 +40,10 @@ pub trait MemoryStore: Send + Sync {
         user_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<ChatMessageRecord>>;
+
+    async fn delete_chat_message(&self, user_id: &str, message_id: &str) -> anyhow::Result<bool>;
+
+    async fn clear_chat_messages(&self, user_id: &str) -> anyhow::Result<u64>;
 
     async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>>;
 
