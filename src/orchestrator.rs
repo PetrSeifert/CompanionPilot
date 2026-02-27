@@ -25,6 +25,11 @@ enum SearchDecision {
     Skip { reason: &'static str },
 }
 
+enum MemoryDecision {
+    Store(MemoryFact),
+    Skip { reason: &'static str },
+}
+
 impl DefaultChatOrchestrator {
     pub fn new(
         model: Arc<dyn ModelProvider>,
@@ -150,8 +155,23 @@ impl DefaultChatOrchestrator {
             })
             .await?;
 
-        if let Some(fact) = extract_memory_fact(&ctx.content) {
-            self.memory.upsert_fact(&ctx.user_id, fact).await?;
+        match self.decide_memory_fact(&ctx.content, &memory_context).await {
+            MemoryDecision::Store(fact) => {
+                info!(
+                    user_id = %ctx.user_id,
+                    memory_key = %fact.key,
+                    confidence = fact.confidence,
+                    "memory fact stored"
+                );
+                self.memory.upsert_fact(&ctx.user_id, fact).await?;
+            }
+            MemoryDecision::Skip { reason } => {
+                debug!(
+                    user_id = %ctx.user_id,
+                    reason,
+                    "memory write skipped"
+                );
+            }
         }
 
         let reply = OrchestratorReply {
@@ -266,6 +286,67 @@ impl DefaultChatOrchestrator {
             }
         }
     }
+
+    async fn decide_memory_fact(
+        &self,
+        user_input: &str,
+        memory: &crate::types::MemoryContext,
+    ) -> MemoryDecision {
+        let planner_prompt = build_memory_planner_prompt(memory);
+        let planner_result = self
+            .model
+            .complete(ModelRequest {
+                system_prompt: planner_prompt,
+                user_prompt: user_input.to_owned(),
+            })
+            .await;
+
+        let planner_result = match planner_result {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(?error, "memory planner model call failed");
+                return MemoryDecision::Skip {
+                    reason: "planner_model_error",
+                };
+            }
+        };
+
+        match parse_memory_plan(&planner_result) {
+            Ok(plan) => {
+                if !plan.store {
+                    return MemoryDecision::Skip {
+                        reason: "planner_no_store",
+                    };
+                }
+
+                let key = sanitize_memory_key(&plan.key);
+                let value = clean_memory_value(&plan.value);
+                if key.is_empty() || value.is_empty() {
+                    return MemoryDecision::Skip {
+                        reason: "planner_invalid_fact",
+                    };
+                }
+
+                MemoryDecision::Store(MemoryFact {
+                    key,
+                    value,
+                    confidence: plan.confidence.clamp(0.0, 1.0),
+                    source: "user_message".to_owned(),
+                    updated_at: Utc::now(),
+                })
+            }
+            Err(error) => {
+                warn!(
+                    ?error,
+                    planner_output = %truncate_for_log(&planner_result, 220),
+                    "failed to parse memory planner output"
+                );
+                MemoryDecision::Skip {
+                    reason: "planner_parse_error",
+                }
+            }
+        }
+    }
 }
 
 fn parse_search_command(content: &str) -> Option<&str> {
@@ -342,6 +423,70 @@ fn truncate_for_log(input: &str, max_len: usize) -> String {
     result
 }
 
+fn build_memory_planner_prompt(memory: &crate::types::MemoryContext) -> String {
+    let mut context = String::new();
+    if !memory.facts.is_empty() {
+        let facts = memory
+            .facts
+            .iter()
+            .map(|fact| format!("{}={}", fact.key, fact.value))
+            .collect::<Vec<_>>()
+            .join("; ");
+        context = format!("Existing user facts: {facts}");
+    }
+
+    format!(
+        "You are a memory router for CompanionPilot.
+Decide if the user's message should be stored as long-term memory.
+Return strict JSON only (no markdown):
+{{\"store\": true|false, \"key\": \"...\", \"value\": \"...\", \"confidence\": 0.0-1.0}}
+If store=false, set key and value to empty strings.
+{}
+Rules:
+- Store only durable personal facts (identity, preferences, recurring goals, corrections).
+- Do not store one-off requests or transient states.
+- If user corrects a previous fact, store corrected value under the same key.",
+        context
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryPlan {
+    store: bool,
+    key: String,
+    value: String,
+    confidence: f32,
+}
+
+fn parse_memory_plan(raw: &str) -> Result<MemoryPlan, serde_json::Error> {
+    let candidate = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    serde_json::from_str::<MemoryPlan>(candidate)
+}
+
+fn sanitize_memory_key(raw: &str) -> String {
+    let mut normalized = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    while normalized.contains("__") {
+        normalized = normalized.replace("__", "_");
+    }
+
+    normalized.trim_matches('_').to_owned()
+}
+
 fn fallback_search_query(input: &str) -> String {
     const STOPWORDS: &[&str] = &[
         "a", "an", "and", "are", "be", "can", "could", "for", "get", "i", "is", "it", "latest",
@@ -412,27 +557,15 @@ fn build_system_prompt(memory: &crate::types::MemoryContext) -> String {
     sections.join("\n")
 }
 
-fn extract_memory_fact(input: &str) -> Option<MemoryFact> {
-    let lower = input.to_lowercase();
-    if let Some(name) = lower.strip_prefix("my name is ") {
-        return Some(MemoryFact {
-            key: "name".to_owned(),
-            value: name.trim().to_owned(),
-            confidence: 0.95,
-            source: "user_message".to_owned(),
-            updated_at: Utc::now(),
-        });
-    }
-    if let Some(game) = lower.strip_prefix("i play ") {
-        return Some(MemoryFact {
-            key: "favorite_game".to_owned(),
-            value: game.trim().to_owned(),
-            confidence: 0.8,
-            source: "user_message".to_owned(),
-            updated_at: Utc::now(),
-        });
-    }
-    None
+fn clean_memory_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|character: char| character == '"' || character == '\'')
+        .trim_end_matches(|character: char| {
+            character == '.' || character == '!' || character == '?'
+        })
+        .trim()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -450,7 +583,10 @@ mod tests {
         types::MessageCtx,
     };
 
-    use super::{DefaultChatOrchestrator, fallback_search_query, normalize_for_compare};
+    use super::{
+        DefaultChatOrchestrator, clean_memory_value, fallback_search_query, normalize_for_compare,
+        sanitize_memory_key,
+    };
 
     #[tokio::test]
     async fn persists_simple_name_fact() {
@@ -536,6 +672,48 @@ mod tests {
         assert!(err.contains("web_search tool is not configured"));
     }
 
+    #[tokio::test]
+    async fn name_correction_overwrites_previous_memory() {
+        let memory = Arc::new(InMemoryMemoryStore::default());
+        let orchestrator = DefaultChatOrchestrator::new(
+            Arc::new(MockModelProvider),
+            memory.clone(),
+            Arc::new(ToolRegistry::default()),
+            SafetyPolicy::default(),
+        );
+
+        let _ = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "4".into(),
+                user_id: "u4".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "my name is Petrr".into(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("first message should succeed");
+
+        let _ = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "5".into(),
+                user_id: "u4".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "I misspelled my name, it's Petr.".into(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("correction message should succeed");
+
+        let facts = memory
+            .search_relevant("u4", "name", 10)
+            .await
+            .expect("search should succeed");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].value, "Petr");
+    }
+
     #[test]
     fn fallback_query_compacts_user_prompt() {
         let query = fallback_search_query("What is the latest Rust release today?");
@@ -547,5 +725,15 @@ mod tests {
         let a = normalize_for_compare("What is  Rust?  ");
         let b = normalize_for_compare("what is rust");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sanitize_memory_key_normalizes_words() {
+        assert_eq!(sanitize_memory_key("Favorite Game"), "favorite_game");
+    }
+
+    #[test]
+    fn clean_memory_value_trims_wrappers() {
+        assert_eq!(clean_memory_value("\"Petr.\""), "Petr");
     }
 }

@@ -67,6 +67,7 @@ http://localhost:8080/app
 - Mention the bot or DM it.
 - Use `/search <query>` in Discord as a manual search override.
 - CompanionPilot can also decide to run web search automatically for time-sensitive/factual questions.
+- Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 
 ## Notes
 
