@@ -500,8 +500,15 @@ Return strict JSON with no markdown:
 Set query to empty string when use_search is false.
 {}
 Rules:
+- If the user explicitly asks to search, find, look up, browse, compare options, or discover similar projects/tools, set use_search=true.
+- If the user asks for recommendations that depend on currently available options, set use_search=true.
 - Use search for time-sensitive, latest/current, news, prices, weather, or unknown factual claims.
-- Do not use search for casual conversation or personal memory recall.",
+- Do not use search for casual conversation or personal memory recall.
+- Keep query concise and retrieval-oriented (3-12 words), avoiding filler words.
+Examples:
+- User: \"Search for some similar AI project like the one I am building.\" -> {{\"use_search\":true,\"query\":\"similar AI companion orchestrator projects\"}}
+- User: \"Find alternatives to Tavily for AI search.\" -> {{\"use_search\":true,\"query\":\"Tavily alternatives AI search API\"}}
+- User: \"What did I just tell you?\" -> {{\"use_search\":false,\"query\":\"\"}}",
         context
     )
 }
