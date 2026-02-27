@@ -189,6 +189,24 @@ impl MemoryStore for InMemoryMemoryStore {
         Ok(removed)
     }
 
+    async fn clear_tool_calls(&self, user_id: &str) -> anyhow::Result<u64> {
+        let mut tool_calls = self.tool_calls.write().await;
+        let removed = tool_calls
+            .remove(user_id)
+            .map(|list| list.len() as u64)
+            .unwrap_or(0);
+        Ok(removed)
+    }
+
+    async fn clear_planner_decisions(&self, user_id: &str) -> anyhow::Result<u64> {
+        let mut decisions = self.planner_decisions.write().await;
+        let removed = decisions
+            .remove(user_id)
+            .map(|list| list.len() as u64)
+            .unwrap_or(0);
+        Ok(removed)
+    }
+
     async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>> {
         let facts = self.facts.read().await;
         let chats = self.chats.read().await;

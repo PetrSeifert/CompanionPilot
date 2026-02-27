@@ -99,8 +99,16 @@ pub fn router(state: AppState) -> Router {
             get(list_user_tool_calls),
         )
         .route(
+            "/api/dashboard/users/{user_id}/toolcalls",
+            axum::routing::delete(clear_user_tool_calls),
+        )
+        .route(
             "/api/dashboard/users/{user_id}/planners",
             get(list_user_planner_decisions),
+        )
+        .route(
+            "/api/dashboard/users/{user_id}/planners",
+            axum::routing::delete(clear_user_planner_decisions),
         )
         .route(
             "/api/dashboard/users/{user_id}/chat",
@@ -254,6 +262,30 @@ async fn clear_user_chats(
     let deleted = state
         .memory
         .clear_chat_messages(&user_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+async fn clear_user_tool_calls(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let deleted = state
+        .memory
+        .clear_tool_calls(&user_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+async fn clear_user_planner_decisions(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let deleted = state
+        .memory
+        .clear_planner_decisions(&user_id)
         .await
         .map_err(internal_error)?;
     Ok(Json(serde_json::json!({ "deleted": deleted })))
@@ -707,6 +739,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       color: #dff9ee;
       font-family: "IBM Plex Mono", monospace;
       font-size: .82rem;
+      white-space: nowrap;
     }
 
     .dots { display: inline-block; width: 14px; text-align: left; }
@@ -859,14 +892,20 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
           <div class="stack-section sec-tools">
             <div class="subpanel-title">
               <span>Tool Calls</span>
-              <span id="tools-count" class="badge">0</span>
+              <div style="display:flex;align-items:center;gap:6px">
+                <button class="tiny-btn warn" id="clear-tools">Clear</button>
+                <span id="tools-count" class="badge">0</span>
+              </div>
             </div>
             <div id="toolcalls" class="tool-list"></div>
           </div>
           <div class="stack-section sec-planners">
             <div class="subpanel-title">
               <span>Planner Decisions</span>
-              <span id="planners-count" class="badge">0</span>
+              <div style="display:flex;align-items:center;gap:6px">
+                <button class="tiny-btn warn" id="clear-planners">Clear</button>
+                <span id="planners-count" class="badge">0</span>
+              </div>
             </div>
             <div id="planners" class="planner-list"></div>
           </div>
@@ -892,6 +931,8 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     const factKeyEl      = document.getElementById("fact-key");
     const factValueEl    = document.getElementById("fact-value");
     const factSaveBtn    = document.getElementById("fact-save");
+    const clearToolsBtn  = document.getElementById("clear-tools");
+    const clearPlannersBtn = document.getElementById("clear-planners");
     const refreshBtn     = document.getElementById("refresh-btn");
     const userCountEl    = document.getElementById("user-count");
     const chatCountEl    = document.getElementById("chat-count");
@@ -953,11 +994,28 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       sendStatusEl.classList.toggle("sending", sending);
     }
 
+    function addOptimisticUserBubble(text) {
+      const markup = `
+        <div class="chat-row user" id="optimistic-msg">
+          <div class="chat-content">
+            <div class="bubble">${escapeHtml(text)}</div>
+          </div>
+        </div>
+      `;
+      chatEl.insertAdjacentHTML("beforeend", markup);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function removeOptimisticUserBubble() {
+      const node = document.getElementById("optimistic-msg");
+      if (node) node.remove();
+    }
+
     function addPendingAssistantBubble() {
       pendingBubbleId = `pending-${Date.now()}`;
       const markup = `
         <div class="chat-row assistant" id="${pendingBubbleId}">
-          <div class="bubble pending">CompanionPilot is thinking<span class="dots">...</span></div>
+          <div class="bubble pending">Thinking<span class="dots">...</span></div>
         </div>
       `;
       chatEl.insertAdjacentHTML("beforeend", markup);
@@ -1131,6 +1189,8 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       }
 
       setSendingState(true);
+      promptEl.value = "";
+      addOptimisticUserBubble(content);
       addPendingAssistantBubble();
       try {
         const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/chat`, {
@@ -1139,13 +1199,15 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
           body: JSON.stringify({ content })
         });
         await expectOk(resp);
-        promptEl.value = "";
+        removeOptimisticUserBubble();
         removePendingAssistantBubble();
         await renderSelectedUser();
         await loadUsers();
       } catch (error) {
+        removeOptimisticUserBubble();
         removePendingAssistantBubble();
         chatErrorEl.textContent = `Send failed: ${error.message || error}`;
+        promptEl.value = content;
       } finally {
         setSendingState(false);
       }
@@ -1235,6 +1297,44 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       }
     }
 
+    async function clearToolCalls() {
+      if (!selectedUser) return;
+      if (!confirm("Clear all tool call logs for this user?")) return;
+
+      clearToolsBtn.disabled = true;
+      try {
+        const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/toolcalls`, {
+          method: "DELETE"
+        });
+        await expectOk(resp);
+        await renderSelectedUser();
+        await loadUsers();
+      } catch (error) {
+        chatErrorEl.textContent = `Clear tool calls failed: ${error.message || error}`;
+      } finally {
+        clearToolsBtn.disabled = false;
+      }
+    }
+
+    async function clearPlannerDecisions() {
+      if (!selectedUser) return;
+      if (!confirm("Clear all planner decision logs for this user?")) return;
+
+      clearPlannersBtn.disabled = true;
+      try {
+        const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/planners`, {
+          method: "DELETE"
+        });
+        await expectOk(resp);
+        await renderSelectedUser();
+        await loadUsers();
+      } catch (error) {
+        chatErrorEl.textContent = `Clear planner decisions failed: ${error.message || error}`;
+      } finally {
+        clearPlannersBtn.disabled = false;
+      }
+    }
+
     window.deleteFact        = deleteFact;
     window.deleteChatMessage = deleteChatMessage;
 
@@ -1259,6 +1359,8 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
 
     factSaveBtn.addEventListener("click", saveFact);
     clearChatBtn.addEventListener("click", clearConversation);
+    clearToolsBtn.addEventListener("click", clearToolCalls);
+    clearPlannersBtn.addEventListener("click", clearPlannerDecisions);
 
     (async function bootstrap() {
       await checkHealth();
