@@ -20,8 +20,8 @@ impl MemoryStore for InMemoryMemoryStore {
     async fn load_context(
         &self,
         user_id: &str,
-        _guild_id: &str,
-        _channel_id: &str,
+        guild_id: &str,
+        channel_id: &str,
     ) -> anyhow::Result<MemoryContext> {
         let facts = self
             .facts
@@ -39,6 +39,7 @@ impl MemoryStore for InMemoryMemoryStore {
             .cloned()
             .unwrap_or_default()
             .into_iter()
+            .filter(|message| message.guild_id == guild_id && message.channel_id == channel_id)
             .rev()
             .take(8)
             .map(|message| format!("{}: {}", message.role.as_str(), message.content))

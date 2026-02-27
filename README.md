@@ -68,6 +68,7 @@ http://localhost:8080/app
 - Use `/search <query>` in Discord as a manual search override.
 - CompanionPilot can also decide to run web search automatically for time-sensitive/factual questions.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
+- Short-term memory is injected from recent channel turns, even when no long-term fact is stored.
 
 ## Notes
 

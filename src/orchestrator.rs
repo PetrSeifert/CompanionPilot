@@ -46,6 +46,11 @@ impl DefaultChatOrchestrator {
     }
 
     pub async fn handle_message(&self, ctx: MessageCtx) -> anyhow::Result<OrchestratorReply> {
+        let safety_flags = self.safety.validate_user_message(&ctx.content);
+        let memory_context = self
+            .memory
+            .load_context(&ctx.user_id, &ctx.guild_id, &ctx.channel_id)
+            .await?;
         self.memory
             .record_chat_message(ChatMessageRecord {
                 user_id: ctx.user_id.clone(),
@@ -55,12 +60,6 @@ impl DefaultChatOrchestrator {
                 content: ctx.content.clone(),
                 timestamp: ctx.timestamp,
             })
-            .await?;
-
-        let safety_flags = self.safety.validate_user_message(&ctx.content);
-        let memory_context = self
-            .memory
-            .load_context(&ctx.user_id, &ctx.guild_id, &ctx.channel_id)
             .await?;
 
         let search_decision = if let Some(manual) = parse_search_command(&ctx.content) {
@@ -107,7 +106,10 @@ impl DefaultChatOrchestrator {
             let final_text = self
                 .model
                 .complete(ModelRequest {
-                    system_prompt: "You are CompanionPilot. Use the provided search output to answer the user's request precisely. If citations are provided, keep your answer concise and factual.".to_owned(),
+                    system_prompt: format!(
+                        "You are CompanionPilot. Use the provided search output to answer the user's request precisely. If citations are provided, keep your answer concise and factual.\n{}",
+                        build_recent_context_block(&memory_context.recent_messages)
+                    ),
                     user_prompt: format!(
                         "User request:\n{}\n\nSearch output:\n{}",
                         ctx.content, tool_result.text
@@ -544,6 +546,10 @@ fn build_system_prompt(memory: &crate::types::MemoryContext) -> String {
         sections.push(format!("Conversation summary: {summary}"));
     }
 
+    if !memory.recent_messages.is_empty() {
+        sections.push(build_recent_context_block(&memory.recent_messages));
+    }
+
     if !memory.facts.is_empty() {
         let lines = memory
             .facts
@@ -555,6 +561,24 @@ fn build_system_prompt(memory: &crate::types::MemoryContext) -> String {
     }
 
     sections.join("\n")
+}
+
+fn build_recent_context_block(recent_messages: &[String]) -> String {
+    if recent_messages.is_empty() {
+        return String::new();
+    }
+
+    let turns = recent_messages
+        .iter()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Recent conversation turns:\n{turns}")
 }
 
 fn clean_memory_value(value: &str) -> String {
@@ -712,6 +736,44 @@ mod tests {
             .expect("search should succeed");
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].value, "Petr");
+    }
+
+    #[tokio::test]
+    async fn short_term_memory_includes_recent_non_fact_turns() {
+        let memory = Arc::new(InMemoryMemoryStore::default());
+        let orchestrator = DefaultChatOrchestrator::new(
+            Arc::new(MockModelProvider),
+            memory,
+            Arc::new(ToolRegistry::default()),
+            SafetyPolicy::default(),
+        );
+
+        let _ = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "6".into(),
+                user_id: "u6".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "I am 24 years old.".into(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("first message should succeed");
+
+        let second = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "7".into(),
+                user_id: "u6".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "What did I just tell you?".into(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("second message should succeed");
+
+        assert!(second.text.contains("Recent conversation turns:"));
+        assert!(second.text.contains("user: I am 24 years old."));
     }
 
     #[test]
