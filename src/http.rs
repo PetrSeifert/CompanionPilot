@@ -345,15 +345,21 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
 
     .memory-list, .chat-list, .tool-list, .planner-list {
       padding: 10px 12px 14px;
-      max-height: 42vh;
+      max-height: none;
+      min-height: 0;
       overflow: auto;
     }
 
     .stack {
       display: grid;
-      grid-template-rows: 1fr 1fr 1fr;
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
       gap: 0;
       height: 100%;
+    }
+    .stack > div {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
     }
 
     .subpanel-title {
@@ -421,13 +427,30 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       margin-bottom: 6px;
       color: #d2e9ff;
       line-height: 1.35;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .tool-result {
       white-space: pre-wrap;
       font-size: .79rem;
       color: var(--muted);
-      line-height: 1.3;
+      line-height: 1.35;
       margin-top: 4px;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .tool-result-preview {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    details.tool-expand {
+      margin-top: 6px;
+      font-size: .78rem;
+    }
+    details.tool-expand > summary {
+      cursor: pointer;
+      color: var(--accent-2);
+      user-select: none;
     }
 
     .planner-item {
@@ -474,6 +497,18 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       font-size: .72rem;
       font-family: "IBM Plex Mono", monospace;
     }
+    .bubble.pending {
+      border-color: rgba(93,226,162,.35);
+      background: rgba(20, 56, 49, .45);
+      color: #dff9ee;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: .82rem;
+    }
+    .dots {
+      display: inline-block;
+      width: 14px;
+      text-align: left;
+    }
 
     .composer {
       border-top: 1px solid var(--border);
@@ -481,6 +516,21 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       display: grid;
       gap: 8px;
       background: rgba(12, 27, 38, 0.9);
+    }
+    .composer-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .send-status {
+      font-size: .82rem;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      white-space: nowrap;
+    }
+    .send-status.sending {
+      color: var(--accent);
     }
 
     textarea, button {
@@ -542,7 +592,10 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         <div id="chat" class="chat-list"></div>
         <div class="composer">
           <textarea id="prompt" placeholder="Send a test message as selected user..."></textarea>
-          <button id="send">Send to CompanionPilot</button>
+          <div class="composer-actions">
+            <button id="send">Send to CompanionPilot</button>
+            <div id="send-status" class="send-status">Ready</div>
+          </div>
           <div id="chat-error" class="error"></div>
         </div>
       </article>
@@ -576,8 +629,11 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     const statusEl = document.getElementById("status");
     const sendBtn = document.getElementById("send");
     const promptEl = document.getElementById("prompt");
+    const sendStatusEl = document.getElementById("send-status");
     const chatErrorEl = document.getElementById("chat-error");
     let selectedUser = null;
+    let isSending = false;
+    let pendingBubbleId = null;
 
     const fmtDate = (iso) => {
       const date = new Date(iso);
@@ -598,6 +654,48 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         return argsJson;
       }
     };
+
+    const renderExpandableText = (value, maxChars = 320) => {
+      const safe = escapeHtml(value || "");
+      if (safe.length <= maxChars) {
+        return `<div class="tool-result">${safe || "n/a"}</div>`;
+      }
+      const preview = safe.slice(0, maxChars) + "...";
+      return `
+        <div class="tool-result tool-result-preview">${preview}</div>
+        <details class="tool-expand">
+          <summary>Show full result</summary>
+          <div class="tool-result">${safe}</div>
+        </details>
+      `;
+    };
+
+    function setSendingState(sending) {
+      isSending = sending;
+      sendBtn.disabled = sending;
+      promptEl.disabled = sending;
+      sendBtn.textContent = sending ? "Sending..." : "Send to CompanionPilot";
+      sendStatusEl.textContent = sending ? "Waiting for response..." : "Ready";
+      sendStatusEl.classList.toggle("sending", sending);
+    }
+
+    function addPendingAssistantBubble() {
+      pendingBubbleId = `pending-${Date.now()}`;
+      const markup = `
+        <div class="chat-row assistant" id="${pendingBubbleId}">
+          <div class="bubble pending">CompanionPilot is thinking<span class="dots">...</span></div>
+        </div>
+      `;
+      chatEl.insertAdjacentHTML("beforeend", markup);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function removePendingAssistantBubble() {
+      if (!pendingBubbleId) return;
+      const node = document.getElementById(pendingBubbleId);
+      if (node) node.remove();
+      pendingBubbleId = null;
+    }
 
     async function checkHealth() {
       try {
@@ -621,6 +719,8 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         plannersEl.innerHTML = '<div class="empty">No planner decisions recorded.</div>';
         chatEl.innerHTML = '<div class="empty">No chat history loaded.</div>';
         selectedUser = null;
+        sendStatusEl.textContent = "No users";
+        sendStatusEl.classList.remove("sending");
         return;
       }
 
@@ -628,7 +728,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         const node = document.createElement("div");
         node.className = "user-item" + (selectedUser === user.user_id ? " active" : "");
         node.innerHTML = `
-          <div class="user-id">${user.user_id}</div>
+          <div class="user-id">${escapeHtml(user.user_id)}</div>
           <div class="user-meta">${user.message_count} msgs • ${user.fact_count} facts • ${fmtDate(user.last_activity)}</div>
         `;
         node.onclick = async () => {
@@ -641,6 +741,10 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
 
       if (!selectedUser) {
         selectedUser = users[0].user_id;
+      }
+      if (!isSending) {
+        sendStatusEl.textContent = "Ready";
+        sendStatusEl.classList.remove("sending");
       }
       await renderSelectedUser();
     }
@@ -690,7 +794,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
                 <span class="tool-status ${call.success ? "ok" : "err"}">${call.success ? "success" : "error"}</span>
               </div>
               <div class="tool-query">query: ${escapeHtml(queryFromArgs(call.args_json))}</div>
-              <div class="tool-result">${escapeHtml(call.success ? call.result_text : (call.error || "unknown tool error"))}</div>
+              ${renderExpandableText(call.success ? call.result_text : (call.error || "unknown tool error"))}
               <div class="fact-meta">${fmtDate(call.timestamp)} • ${call.citations.length} citations</div>
             </div>
           `).join("")
@@ -705,7 +809,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
                 <span class="tool-status ${entry.success ? "ok" : "err"}">${entry.success ? "ok" : "error"}</span>
               </div>
               <div class="tool-query">reason: ${escapeHtml(entry.rationale)}</div>
-              <div class="tool-result">${escapeHtml(entry.payload_json)}</div>
+              ${renderExpandableText(entry.payload_json, 220)}
               ${entry.error ? `<div class="error">${escapeHtml(entry.error)}</div>` : ""}
               <div class="fact-meta">${fmtDate(entry.timestamp)}</div>
             </div>
@@ -716,6 +820,9 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     }
 
     sendBtn.onclick = async () => {
+      if (isSending) {
+        return;
+      }
       chatErrorEl.textContent = "";
       const content = promptEl.value.trim();
       if (!selectedUser) {
@@ -727,7 +834,8 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         return;
       }
 
-      sendBtn.disabled = true;
+      setSendingState(true);
+      addPendingAssistantBubble();
       try {
         const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/chat`, {
           method: "POST",
@@ -739,14 +847,23 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
           throw new Error(text || "request failed");
         }
         promptEl.value = "";
+        removePendingAssistantBubble();
         await renderSelectedUser();
         await loadUsers();
       } catch (error) {
+        removePendingAssistantBubble();
         chatErrorEl.textContent = `Send failed: ${error.message || error}`;
       } finally {
-        sendBtn.disabled = false;
+        setSendingState(false);
       }
     };
+
+    promptEl.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        sendBtn.click();
+      }
+    });
 
     (async function bootstrap() {
       await checkHealth();
