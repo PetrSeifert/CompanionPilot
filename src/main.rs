@@ -22,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
 
     let model = build_model_provider(&config);
     let memory = build_memory_store(&config).await?;
+    let dashboard_memory = memory.clone();
     let tools = build_tools(&config);
 
     let orchestrator = Arc::new(DefaultChatOrchestrator::new(
@@ -48,7 +49,10 @@ async fn main() -> anyhow::Result<()> {
         warn!("REDIS_URL is not configured; using stateless in-process cache only");
     }
 
-    let app = http::router(AppState { orchestrator });
+    let app = http::router(AppState {
+        orchestrator,
+        memory: dashboard_memory,
+    });
     let listener = TcpListener::bind(config.http_bind).await?;
     info!("CompanionPilot HTTP API listening on {}", config.http_bind);
 

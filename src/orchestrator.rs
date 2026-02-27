@@ -8,7 +8,7 @@ use crate::{
     model::{ModelProvider, ModelRequest},
     safety::SafetyPolicy,
     tools::ToolExecutor,
-    types::{MemoryFact, MessageCtx, OrchestratorReply, ToolCall},
+    types::{ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, OrchestratorReply, ToolCall},
 };
 
 pub struct DefaultChatOrchestrator {
@@ -34,6 +34,17 @@ impl DefaultChatOrchestrator {
     }
 
     pub async fn handle_message(&self, ctx: MessageCtx) -> anyhow::Result<OrchestratorReply> {
+        self.memory
+            .record_chat_message(ChatMessageRecord {
+                user_id: ctx.user_id.clone(),
+                guild_id: ctx.guild_id.clone(),
+                channel_id: ctx.channel_id.clone(),
+                role: ChatRole::User,
+                content: ctx.content.clone(),
+                timestamp: ctx.timestamp,
+            })
+            .await?;
+
         let safety_flags = self.safety.validate_user_message(&ctx.content);
         let memory_context = self
             .memory
@@ -55,6 +66,16 @@ impl DefaultChatOrchestrator {
                 }],
                 safety_flags,
             };
+            self.memory
+                .record_chat_message(ChatMessageRecord {
+                    user_id: ctx.user_id,
+                    guild_id: ctx.guild_id,
+                    channel_id: ctx.channel_id,
+                    role: ChatRole::Assistant,
+                    content: reply.text.clone(),
+                    timestamp: Utc::now(),
+                })
+                .await?;
             return Ok(reply);
         }
 
@@ -71,12 +92,25 @@ impl DefaultChatOrchestrator {
             self.memory.upsert_fact(&ctx.user_id, fact).await?;
         }
 
-        Ok(OrchestratorReply {
+        let reply = OrchestratorReply {
             text: model_response,
             citations: Vec::new(),
             tool_calls: Vec::new(),
             safety_flags,
-        })
+        };
+
+        self.memory
+            .record_chat_message(ChatMessageRecord {
+                user_id: ctx.user_id,
+                guild_id: ctx.guild_id,
+                channel_id: ctx.channel_id,
+                role: ChatRole::Assistant,
+                content: reply.text.clone(),
+                timestamp: Utc::now(),
+            })
+            .await?;
+
+        Ok(reply)
     }
 }
 

@@ -3,7 +3,7 @@ mod postgres;
 
 use async_trait::async_trait;
 
-use crate::types::{MemoryContext, MemoryFact};
+use crate::types::{ChatMessageRecord, MemoryContext, MemoryFact, UserDashboardSummary};
 
 pub use in_memory::InMemoryMemoryStore;
 pub use postgres::PostgresMemoryStore;
@@ -25,4 +25,16 @@ pub trait MemoryStore: Send + Sync {
         query: &str,
         k: usize,
     ) -> anyhow::Result<Vec<MemoryFact>>;
+
+    async fn list_facts(&self, user_id: &str, limit: usize) -> anyhow::Result<Vec<MemoryFact>>;
+
+    async fn record_chat_message(&self, message: ChatMessageRecord) -> anyhow::Result<()>;
+
+    async fn list_chat_messages(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ChatMessageRecord>>;
+
+    async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>>;
 }

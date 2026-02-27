@@ -48,3 +48,37 @@ pub struct OrchestratorReply {
     pub tool_calls: Vec<ToolCall>,
     pub safety_flags: Vec<String>,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+impl ChatRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatRole::User => "user",
+            ChatRole::Assistant => "assistant",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessageRecord {
+    pub user_id: String,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub role: ChatRole,
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserDashboardSummary {
+    pub user_id: String,
+    pub fact_count: i64,
+    pub message_count: i64,
+    pub last_activity: DateTime<Utc>,
+}

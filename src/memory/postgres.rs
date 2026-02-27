@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
-use crate::types::{MemoryContext, MemoryFact};
+use crate::types::{ChatMessageRecord, ChatRole, MemoryContext, MemoryFact, UserDashboardSummary};
 
 use super::MemoryStore;
 
@@ -63,9 +63,26 @@ impl MemoryStore for PostgresMemoryStore {
         .await?
         .map(|row| row.0);
 
+        let recent_messages = sqlx::query_as::<_, (String, String)>(
+            "SELECT role, content
+             FROM chat_messages
+             WHERE user_id = $1 AND guild_id = $2 AND channel_id = $3
+             ORDER BY timestamp DESC
+             LIMIT 8",
+        )
+        .bind(user_id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .rev()
+        .map(|(role, content)| format!("{role}: {content}"))
+        .collect::<Vec<_>>();
+
         Ok(MemoryContext {
             summary,
-            recent_messages: Vec::new(),
+            recent_messages,
             facts,
         })
     }
@@ -123,5 +140,155 @@ impl MemoryStore for PostgresMemoryStore {
             .collect();
 
         Ok(facts)
+    }
+
+    async fn list_facts(&self, user_id: &str, limit: usize) -> anyhow::Result<Vec<MemoryFact>> {
+        let limit = limit as i64;
+
+        let facts =
+            sqlx::query_as::<_, (String, String, f32, String, chrono::DateTime<chrono::Utc>)>(
+                "SELECT key, value, confidence, source, updated_at
+                 FROM memory_facts
+                 WHERE user_id = $1
+                 ORDER BY updated_at DESC
+                 LIMIT $2",
+            )
+            .bind(user_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|(key, value, confidence, source, updated_at)| MemoryFact {
+                key,
+                value,
+                confidence,
+                source,
+                updated_at,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(facts)
+    }
+
+    async fn record_chat_message(&self, message: ChatMessageRecord) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO chat_messages
+             (user_id, guild_id, channel_id, role, content, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(message.user_id)
+        .bind(message.guild_id)
+        .bind(message.channel_id)
+        .bind(message.role.as_str())
+        .bind(message.content)
+        .bind(message.timestamp)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn list_chat_messages(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ChatMessageRecord>> {
+        let limit = limit as i64;
+
+        let mut messages = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(
+            "SELECT user_id, guild_id, channel_id, role, content, timestamp
+             FROM chat_messages
+             WHERE user_id = $1
+             ORDER BY timestamp DESC
+             LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(
+            |(user_id, guild_id, channel_id, role, content, timestamp)| ChatMessageRecord {
+                user_id,
+                guild_id,
+                channel_id,
+                role: parse_role(&role),
+                content,
+                timestamp,
+            },
+        )
+        .collect::<Vec<_>>();
+
+        messages.reverse();
+        Ok(messages)
+    }
+
+    async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>> {
+        let limit = limit as i64;
+
+        let users = sqlx::query_as::<_, (String, i64, i64, chrono::DateTime<chrono::Utc>)>(
+            "SELECT
+                     u.user_id AS user_id,
+                     COALESCE(f.fact_count, 0) AS fact_count,
+                     COALESCE(m.message_count, 0) AS message_count,
+                     u.last_activity AS last_activity
+                 FROM (
+                     SELECT user_id, MAX(last_activity) AS last_activity
+                     FROM (
+                         SELECT user_id, MAX(updated_at) AS last_activity
+                         FROM memory_facts
+                         GROUP BY user_id
+                         UNION ALL
+                         SELECT user_id, MAX(timestamp) AS last_activity
+                         FROM chat_messages
+                         GROUP BY user_id
+                     ) activity
+                     GROUP BY user_id
+                 ) u
+                 LEFT JOIN (
+                     SELECT user_id, COUNT(*)::bigint AS fact_count
+                     FROM memory_facts
+                     GROUP BY user_id
+                 ) f ON f.user_id = u.user_id
+                 LEFT JOIN (
+                     SELECT user_id, COUNT(*)::bigint AS message_count
+                     FROM chat_messages
+                     GROUP BY user_id
+                 ) m ON m.user_id = u.user_id
+                 ORDER BY u.last_activity DESC
+                 LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(
+            |(user_id, fact_count, message_count, last_activity)| UserDashboardSummary {
+                user_id,
+                fact_count,
+                message_count,
+                last_activity,
+            },
+        )
+        .collect::<Vec<_>>();
+
+        Ok(users)
+    }
+}
+
+fn parse_role(role: &str) -> ChatRole {
+    match role {
+        "assistant" => ChatRole::Assistant,
+        _ => ChatRole::User,
     }
 }

@@ -1,9 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use tokio::sync::RwLock;
 
-use crate::types::{MemoryContext, MemoryFact};
+use crate::types::{ChatMessageRecord, MemoryContext, MemoryFact, UserDashboardSummary};
 
 use super::MemoryStore;
 
@@ -11,6 +12,7 @@ use super::MemoryStore;
 pub struct InMemoryMemoryStore {
     facts: Arc<RwLock<HashMap<String, Vec<MemoryFact>>>>,
     summaries: Arc<RwLock<HashMap<String, String>>>,
+    chats: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
 }
 
 #[async_trait]
@@ -29,10 +31,25 @@ impl MemoryStore for InMemoryMemoryStore {
             .cloned()
             .unwrap_or_default();
         let summary = self.summaries.read().await.get(user_id).cloned();
+        let recent_messages = self
+            .chats
+            .read()
+            .await
+            .get(user_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .take(8)
+            .map(|message| format!("{}: {}", message.role.as_str(), message.content))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
 
         Ok(MemoryContext {
             summary,
-            recent_messages: Vec::new(),
+            recent_messages,
             facts,
         })
     }
@@ -70,5 +87,90 @@ impl MemoryStore for InMemoryMemoryStore {
 
         matches.truncate(k);
         Ok(matches)
+    }
+
+    async fn list_facts(&self, user_id: &str, limit: usize) -> anyhow::Result<Vec<MemoryFact>> {
+        let mut facts = self
+            .facts
+            .read()
+            .await
+            .get(user_id)
+            .cloned()
+            .unwrap_or_default();
+        facts.sort_by_key(|fact| std::cmp::Reverse(fact.updated_at));
+        facts.truncate(limit);
+        Ok(facts)
+    }
+
+    async fn record_chat_message(&self, message: ChatMessageRecord) -> anyhow::Result<()> {
+        let user_id = message.user_id.clone();
+        let mut chats = self.chats.write().await;
+        chats.entry(user_id).or_default().push(message);
+        Ok(())
+    }
+
+    async fn list_chat_messages(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ChatMessageRecord>> {
+        let mut messages = self
+            .chats
+            .read()
+            .await
+            .get(user_id)
+            .cloned()
+            .unwrap_or_default();
+        messages.sort_by_key(|message| message.timestamp);
+        if messages.len() > limit {
+            let start = messages.len().saturating_sub(limit);
+            messages = messages.split_off(start);
+        }
+        Ok(messages)
+    }
+
+    async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>> {
+        let facts = self.facts.read().await;
+        let chats = self.chats.read().await;
+
+        let mut users = chats
+            .iter()
+            .map(|(user_id, messages)| {
+                let last_activity = messages
+                    .iter()
+                    .map(|message| message.timestamp)
+                    .max()
+                    .unwrap_or_else(Utc::now);
+                let message_count = messages.len() as i64;
+                let fact_count = facts.get(user_id).map_or(0_i64, |f| f.len() as i64);
+
+                UserDashboardSummary {
+                    user_id: user_id.clone(),
+                    fact_count,
+                    message_count,
+                    last_activity,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (user_id, memory_facts) in facts.iter() {
+            if users.iter().any(|entry| entry.user_id == *user_id) {
+                continue;
+            }
+            users.push(UserDashboardSummary {
+                user_id: user_id.clone(),
+                fact_count: memory_facts.len() as i64,
+                message_count: 0,
+                last_activity: memory_facts
+                    .iter()
+                    .map(|fact| fact.updated_at)
+                    .max()
+                    .unwrap_or_else(Utc::now),
+            });
+        }
+
+        users.sort_by_key(|entry| std::cmp::Reverse(entry.last_activity));
+        users.truncate(limit);
+        Ok(users)
     }
 }

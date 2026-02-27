@@ -9,7 +9,8 @@ CompanionPilot is a Rust-first AI orchestrator for Discord chat with long/short-
 - Model abstraction (`OpenAiProvider`, `MockModelProvider`)
 - Memory abstraction (`PostgresMemoryStore`, `InMemoryMemoryStore`)
 - Tool runtime with Tavily web search support
-- HTTP API for health and local chat testing (`axum`)
+- HTTP API for health, chat, and dashboard data (`axum`)
+- Built-in web dashboard at `/app` for users/memory/chats
 - Local dev infra (`docker-compose` with Postgres + Redis)
 - Railway deployment entry (`railway.json`)
 
@@ -27,10 +28,11 @@ cp .env.example .env
 docker compose up -d
 ```
 
-3. Apply migration:
+3. Apply migrations:
 
 ```bash
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0001_init.sql
+psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0002_chat_messages.sql
 ```
 
 4. Run the service:
@@ -53,6 +55,12 @@ curl -X POST http://localhost:8080/chat \
   -d '{"user_id":"demo","content":"my name is Petr"}'
 ```
 
+7. Open the dashboard:
+
+```bash
+http://localhost:8080/app
+```
+
 ## Discord usage
 
 - Set `DISCORD_TOKEN` in `.env`.
@@ -64,3 +72,4 @@ curl -X POST http://localhost:8080/chat \
 - If `OPENAI_API_KEY` is missing, the app falls back to a mock model.
 - If `DATABASE_URL` is missing, memory uses in-process storage.
 - If `TAVILY_API_KEY` is missing, `/search` returns a configuration error.
+- Dashboard endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
