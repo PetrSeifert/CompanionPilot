@@ -263,9 +263,7 @@ impl DefaultChatOrchestrator {
         user_input: &str,
         memory: &crate::types::MemoryContext,
     ) -> SearchDecision {
-        let heuristic_likely = needs_search_heuristic(user_input);
-
-        let planner_prompt = build_search_planner_prompt(memory, heuristic_likely);
+        let planner_prompt = build_search_planner_prompt(memory);
         let planner_result = self
             .model
             .complete(ModelRequest {
@@ -278,12 +276,6 @@ impl DefaultChatOrchestrator {
             Ok(content) => content,
             Err(error) => {
                 warn!(?error, "search planner model call failed");
-                if heuristic_likely {
-                    return SearchDecision::Use {
-                        query: fallback_search_query(user_input),
-                        source: "heuristic_fallback",
-                    };
-                }
                 return SearchDecision::Skip {
                     reason: "planner_model_error",
                 };
@@ -293,24 +285,12 @@ impl DefaultChatOrchestrator {
         match parse_planner_output(&planner_result) {
             Ok(plan) => {
                 if !plan.use_search {
-                    if heuristic_likely {
-                        return SearchDecision::Use {
-                            query: fallback_search_query(user_input),
-                            source: "heuristic_override",
-                        };
-                    }
                     return SearchDecision::Skip {
                         reason: "planner_no_search",
                     };
                 }
                 let query = plan.query.trim();
                 if query.is_empty() {
-                    if heuristic_likely {
-                        return SearchDecision::Use {
-                            query: fallback_search_query(user_input),
-                            source: "heuristic_empty_query_fallback",
-                        };
-                    }
                     return SearchDecision::Skip {
                         reason: "planner_empty_query",
                     };
@@ -337,12 +317,6 @@ impl DefaultChatOrchestrator {
                     planner_output = %truncate_for_log(&planner_result, 220),
                     "failed to parse search planner output"
                 );
-                if heuristic_likely {
-                    return SearchDecision::Use {
-                        query: fallback_search_query(user_input),
-                        source: "heuristic_parse_fallback",
-                    };
-                }
                 SearchDecision::Skip {
                     reason: "planner_parse_error",
                 }
@@ -505,20 +479,7 @@ fn parse_search_command(content: &str) -> Option<&str> {
         .filter(|query| !query.is_empty())
 }
 
-fn needs_search_heuristic(content: &str) -> bool {
-    let lowered = content.trim().to_lowercase();
-    let triggers = [
-        "latest", "today", "current", "news", "price", "release", "update", "weather", "search",
-        "look up",
-    ];
-
-    triggers.iter().any(|item| lowered.contains(item))
-}
-
-fn build_search_planner_prompt(
-    memory: &crate::types::MemoryContext,
-    heuristic_likely: bool,
-) -> String {
+fn build_search_planner_prompt(memory: &crate::types::MemoryContext) -> String {
     let mut context = String::new();
     if !memory.facts.is_empty() {
         let facts = memory
@@ -538,11 +499,10 @@ Return strict JSON with no markdown:
 {{\"use_search\": true|false, \"query\": \"...\"}}
 Set query to empty string when use_search is false.
 {}
-Heuristic likely_search={}
 Rules:
 - Use search for time-sensitive, latest/current, news, prices, weather, or unknown factual claims.
 - Do not use search for casual conversation or personal memory recall.",
-        context, heuristic_likely
+        context
     )
 }
 
@@ -835,11 +795,9 @@ mod tests {
                 content: "What is the latest Rust release today?".into(),
                 timestamp: Utc::now(),
             })
-            .await;
-
-        assert!(result.is_err());
-        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(err.contains("web_search tool is not configured"));
+            .await
+            .expect("message should succeed when planner decides no search");
+        assert!(result.tool_calls.is_empty());
     }
 
     #[tokio::test]
