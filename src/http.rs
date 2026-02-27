@@ -72,6 +72,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/dashboard/users/{user_id}/facts", get(list_user_facts))
         .route("/api/dashboard/users/{user_id}/chats", get(list_user_chats))
         .route(
+            "/api/dashboard/users/{user_id}/toolcalls",
+            get(list_user_tool_calls),
+        )
+        .route(
             "/api/dashboard/users/{user_id}/chat",
             post(send_dashboard_message),
         )
@@ -152,6 +156,20 @@ async fn list_user_chats(
         .await
         .map_err(internal_error)?;
     Ok(Json(messages))
+}
+
+async fn list_user_tool_calls(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Query(query): Query<LimitQuery>,
+) -> Result<Json<Vec<crate::types::ToolCallRecord>>, (axum::http::StatusCode, String)> {
+    let limit = query.limit.unwrap_or(150).clamp(1, 1000);
+    let calls = state
+        .memory
+        .list_tool_calls(&user_id, limit)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(calls))
 }
 
 async fn send_dashboard_message(
@@ -307,10 +325,27 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     .user-id { font-size: .9rem; font-family: "IBM Plex Mono", monospace; }
     .user-meta { color: var(--muted); font-size: .78rem; margin-top: 5px; }
 
-    .memory-list, .chat-list {
+    .memory-list, .chat-list, .tool-list {
       padding: 10px 12px 14px;
       max-height: 42vh;
       overflow: auto;
+    }
+
+    .stack {
+      display: grid;
+      grid-template-rows: 1fr 1fr;
+      gap: 0;
+      height: 100%;
+    }
+
+    .subpanel-title {
+      margin: 0;
+      padding: 10px 12px;
+      font-size: .9rem;
+      color: var(--accent-2);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid rgba(140,180,210,.18);
+      background: rgba(18, 35, 50, .8);
     }
 
     .fact {
@@ -328,6 +363,54 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     }
     .fact-val { font-size: .9rem; }
     .fact-meta { color: var(--muted); font-size: .78rem; margin-top: 6px; }
+
+    .tool-call {
+      background: var(--panel-bright);
+      border: 1px solid rgba(140,180,210,.25);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .tool-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: .84rem;
+      font-family: "IBM Plex Mono", monospace;
+    }
+    .tool-name { color: var(--accent); font-weight: 600; }
+    .tool-source { color: var(--muted); }
+    .tool-status {
+      font-size: .75rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(140,180,210,.3);
+    }
+    .tool-status.ok {
+      color: var(--accent);
+      border-color: rgba(93,226,162,.45);
+      background: rgba(18, 58, 41, .45);
+    }
+    .tool-status.err {
+      color: var(--danger);
+      border-color: rgba(255,111,125,.45);
+      background: rgba(70, 24, 31, .45);
+    }
+    .tool-query {
+      font-size: .82rem;
+      margin-bottom: 6px;
+      color: #d2e9ff;
+      line-height: 1.35;
+    }
+    .tool-result {
+      white-space: pre-wrap;
+      font-size: .79rem;
+      color: var(--muted);
+      line-height: 1.3;
+      margin-top: 4px;
+    }
 
     .chat-row {
       margin-bottom: 10px;
@@ -428,8 +511,17 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       </article>
 
       <article class="panel">
-        <h2>Memory Facts</h2>
-        <div id="facts" class="memory-list"></div>
+        <h2>Memory + Tool Calls</h2>
+        <div class="stack">
+          <div>
+            <h3 class="subpanel-title">Memory Facts</h3>
+            <div id="facts" class="memory-list"></div>
+          </div>
+          <div>
+            <h3 class="subpanel-title">Tool Calls</h3>
+            <div id="toolcalls" class="tool-list"></div>
+          </div>
+        </div>
       </article>
     </section>
   </main>
@@ -437,6 +529,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
   <script>
     const usersEl = document.getElementById("users");
     const factsEl = document.getElementById("facts");
+    const toolCallsEl = document.getElementById("toolcalls");
     const chatEl = document.getElementById("chat");
     const statusEl = document.getElementById("status");
     const sendBtn = document.getElementById("send");
@@ -448,6 +541,20 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       const date = new Date(iso);
       if (Number.isNaN(date.getTime())) return iso;
       return date.toLocaleString();
+    };
+
+    const escapeHtml = (value) => (value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+
+    const queryFromArgs = (argsJson) => {
+      try {
+        const parsed = JSON.parse(argsJson);
+        return parsed.query || argsJson;
+      } catch {
+        return argsJson;
+      }
     };
 
     async function checkHealth() {
@@ -468,6 +575,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       if (!users.length) {
         usersEl.innerHTML = '<div class="empty">No users yet. Send a message via Discord or /chat first.</div>';
         factsEl.innerHTML = '<div class="empty">No memory facts loaded.</div>';
+        toolCallsEl.innerHTML = '<div class="empty">No tool calls recorded.</div>';
         chatEl.innerHTML = '<div class="empty">No chat history loaded.</div>';
         selectedUser = null;
         return;
@@ -497,19 +605,21 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     async function renderSelectedUser() {
       if (!selectedUser) return;
 
-      const [factsResp, chatsResp] = await Promise.all([
+      const [factsResp, chatsResp, toolCallsResp] = await Promise.all([
         fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/facts?limit=200`),
-        fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/chats?limit=300`)
+        fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/chats?limit=300`),
+        fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/toolcalls?limit=200`)
       ]);
 
       const facts = await factsResp.json();
       const chats = await chatsResp.json();
+      const toolCalls = await toolCallsResp.json();
 
       factsEl.innerHTML = facts.length
         ? facts.map((f) => `
             <div class="fact">
-              <div class="fact-key">${f.key}</div>
-              <div class="fact-val">${f.value}</div>
+              <div class="fact-key">${escapeHtml(f.key)}</div>
+              <div class="fact-val">${escapeHtml(f.value)}</div>
               <div class="fact-meta">confidence=${f.confidence.toFixed(2)} • ${fmtDate(f.updated_at)}</div>
             </div>
           `).join("")
@@ -519,12 +629,27 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         ? chats.map((m) => `
             <div class="chat-row ${m.role}">
               <div class="bubble">
-                ${m.content}
+                ${escapeHtml(m.content)}
                 <small>${m.role} • ${m.guild_id}/${m.channel_id} • ${fmtDate(m.timestamp)}</small>
               </div>
             </div>
           `).join("")
         : '<div class="empty">No chat messages for this user.</div>';
+
+      toolCallsEl.innerHTML = toolCalls.length
+        ? toolCalls.map((call) => `
+            <div class="tool-call">
+              <div class="tool-head">
+                <span class="tool-name">${escapeHtml(call.tool_name)}</span>
+                <span class="tool-source">${escapeHtml(call.source)}</span>
+                <span class="tool-status ${call.success ? "ok" : "err"}">${call.success ? "success" : "error"}</span>
+              </div>
+              <div class="tool-query">query: ${escapeHtml(queryFromArgs(call.args_json))}</div>
+              <div class="tool-result">${escapeHtml(call.success ? call.result_text : (call.error || "unknown tool error"))}</div>
+              <div class="fact-meta">${fmtDate(call.timestamp)} • ${call.citations.length} citations</div>
+            </div>
+          `).join("")
+        : '<div class="empty">No tool calls for this user.</div>';
 
       chatEl.scrollTop = chatEl.scrollHeight;
     }

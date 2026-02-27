@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
-use crate::types::{ChatMessageRecord, ChatRole, MemoryContext, MemoryFact, UserDashboardSummary};
+use crate::types::{
+    ChatMessageRecord, ChatRole, MemoryContext, MemoryFact, ToolCallRecord, UserDashboardSummary,
+};
 
 use super::MemoryStore;
 
@@ -284,6 +286,95 @@ impl MemoryStore for PostgresMemoryStore {
 
         Ok(users)
     }
+
+    async fn record_tool_call(&self, tool_call: ToolCallRecord) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO tool_call_logs
+             (user_id, guild_id, channel_id, tool_name, source, args_json, result_text, citations_text, success, error, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(tool_call.user_id)
+        .bind(tool_call.guild_id)
+        .bind(tool_call.channel_id)
+        .bind(tool_call.tool_name)
+        .bind(tool_call.source)
+        .bind(tool_call.args_json)
+        .bind(tool_call.result_text)
+        .bind(tool_call.citations.join("\n"))
+        .bind(tool_call.success)
+        .bind(tool_call.error)
+        .bind(tool_call.timestamp)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn list_tool_calls(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ToolCallRecord>> {
+        let limit = limit as i64;
+        let mut calls = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                bool,
+                Option<String>,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(
+            "SELECT user_id, guild_id, channel_id, tool_name, source, args_json, result_text, citations_text, success, error, timestamp
+             FROM tool_call_logs
+             WHERE user_id = $1
+             ORDER BY timestamp DESC
+             LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(
+            |(
+                user_id,
+                guild_id,
+                channel_id,
+                tool_name,
+                source,
+                args_json,
+                result_text,
+                citations_text,
+                success,
+                error,
+                timestamp,
+            )| ToolCallRecord {
+                user_id,
+                guild_id,
+                channel_id,
+                tool_name,
+                source,
+                args_json,
+                result_text,
+                citations: split_citations(&citations_text),
+                success,
+                error,
+                timestamp,
+            },
+        )
+        .collect::<Vec<_>>();
+
+        calls.reverse();
+        Ok(calls)
+    }
 }
 
 fn parse_role(role: &str) -> ChatRole {
@@ -291,4 +382,12 @@ fn parse_role(role: &str) -> ChatRole {
         "assistant" => ChatRole::Assistant,
         _ => ChatRole::User,
     }
+}
+
+fn split_citations(raw: &str) -> Vec<String> {
+    raw.split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_owned())
+        .collect()
 }

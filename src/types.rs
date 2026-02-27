@@ -82,3 +82,18 @@ pub struct UserDashboardSummary {
     pub message_count: i64,
     pub last_activity: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    pub user_id: String,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub tool_name: String,
+    pub source: String,
+    pub args_json: String,
+    pub result_text: String,
+    pub citations: Vec<String>,
+    pub success: bool,
+    pub error: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}

@@ -10,7 +10,10 @@ use crate::{
     model::{ModelProvider, ModelRequest},
     safety::SafetyPolicy,
     tools::ToolExecutor,
-    types::{ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, OrchestratorReply, ToolCall},
+    types::{
+        ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, OrchestratorReply, ToolCall,
+        ToolCallRecord,
+    },
 };
 
 pub struct DefaultChatOrchestrator {
@@ -88,6 +91,20 @@ impl DefaultChatOrchestrator {
             let tool_result = match self.tools.execute("web_search", args.clone()).await {
                 Ok(result) => result,
                 Err(error) => {
+                    self.record_tool_call(ToolCallRecord {
+                        user_id: ctx.user_id.clone(),
+                        guild_id: ctx.guild_id.clone(),
+                        channel_id: ctx.channel_id.clone(),
+                        tool_name: "web_search".to_owned(),
+                        source: source.to_owned(),
+                        args_json: args.to_string(),
+                        result_text: String::new(),
+                        citations: Vec::new(),
+                        success: false,
+                        error: Some(error.to_string()),
+                        timestamp: Utc::now(),
+                    })
+                    .await;
                     warn!(
                         user_id = %ctx.user_id,
                         guild_id = %ctx.guild_id,
@@ -98,6 +115,20 @@ impl DefaultChatOrchestrator {
                     return Err(error);
                 }
             };
+            self.record_tool_call(ToolCallRecord {
+                user_id: ctx.user_id.clone(),
+                guild_id: ctx.guild_id.clone(),
+                channel_id: ctx.channel_id.clone(),
+                tool_name: "web_search".to_owned(),
+                source: source.to_owned(),
+                args_json: args.to_string(),
+                result_text: truncate_for_log(&tool_result.text, 1200),
+                citations: tool_result.citations.clone(),
+                success: true,
+                error: None,
+                timestamp: Utc::now(),
+            })
+            .await;
             info!(
                 user_id = %ctx.user_id,
                 result_citations = tool_result.citations.len(),
@@ -347,6 +378,12 @@ impl DefaultChatOrchestrator {
                     reason: "planner_parse_error",
                 }
             }
+        }
+    }
+
+    async fn record_tool_call(&self, call: ToolCallRecord) {
+        if let Err(error) = self.memory.record_tool_call(call).await {
+            warn!(?error, "failed to persist tool call log");
         }
     }
 }

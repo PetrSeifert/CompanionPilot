@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::RwLock;
 
-use crate::types::{ChatMessageRecord, MemoryContext, MemoryFact, UserDashboardSummary};
+use crate::types::{
+    ChatMessageRecord, MemoryContext, MemoryFact, ToolCallRecord, UserDashboardSummary,
+};
 
 use super::MemoryStore;
 
@@ -13,6 +15,7 @@ pub struct InMemoryMemoryStore {
     facts: Arc<RwLock<HashMap<String, Vec<MemoryFact>>>>,
     summaries: Arc<RwLock<HashMap<String, String>>>,
     chats: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
+    tool_calls: Arc<RwLock<HashMap<String, Vec<ToolCallRecord>>>>,
 }
 
 #[async_trait]
@@ -173,5 +176,32 @@ impl MemoryStore for InMemoryMemoryStore {
         users.sort_by_key(|entry| std::cmp::Reverse(entry.last_activity));
         users.truncate(limit);
         Ok(users)
+    }
+
+    async fn record_tool_call(&self, tool_call: ToolCallRecord) -> anyhow::Result<()> {
+        let user_id = tool_call.user_id.clone();
+        let mut tool_calls = self.tool_calls.write().await;
+        tool_calls.entry(user_id).or_default().push(tool_call);
+        Ok(())
+    }
+
+    async fn list_tool_calls(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ToolCallRecord>> {
+        let mut calls = self
+            .tool_calls
+            .read()
+            .await
+            .get(user_id)
+            .cloned()
+            .unwrap_or_default();
+        calls.sort_by_key(|call| call.timestamp);
+        if calls.len() > limit {
+            let start = calls.len().saturating_sub(limit);
+            calls = calls.split_off(start);
+        }
+        Ok(calls)
     }
 }
