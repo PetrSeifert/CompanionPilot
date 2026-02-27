@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
@@ -51,14 +52,32 @@ impl DefaultChatOrchestrator {
             .load_context(&ctx.user_id, &ctx.guild_id, &ctx.channel_id)
             .await?;
 
-        if let Some(query) = parse_search_command(&ctx.content) {
+        let search_query = if let Some(manual) = parse_search_command(&ctx.content) {
+            Some(manual.to_owned())
+        } else {
+            self.decide_search_query(&ctx.content, &memory_context)
+                .await
+        };
+
+        if let Some(query) = search_query {
             let args = json!({
                 "query": query,
                 "max_results": 5
             });
             let tool_result = self.tools.execute("web_search", args.clone()).await?;
+            let final_text = self
+                .model
+                .complete(ModelRequest {
+                    system_prompt: "You are CompanionPilot. Use the provided search output to answer the user's request precisely. If citations are provided, keep your answer concise and factual.".to_owned(),
+                    user_prompt: format!(
+                        "User request:\n{}\n\nSearch output:\n{}",
+                        ctx.content, tool_result.text
+                    ),
+                })
+                .await
+                .unwrap_or(tool_result.text.clone());
             let reply = OrchestratorReply {
-                text: tool_result.text,
+                text: final_text,
                 citations: tool_result.citations,
                 tool_calls: vec![ToolCall {
                     tool_name: "web_search".to_owned(),
@@ -112,6 +131,28 @@ impl DefaultChatOrchestrator {
 
         Ok(reply)
     }
+
+    async fn decide_search_query(
+        &self,
+        user_input: &str,
+        memory: &crate::types::MemoryContext,
+    ) -> Option<String> {
+        if let Some(query) = heuristic_search_query(user_input) {
+            return Some(query);
+        }
+
+        let planner_prompt = build_search_planner_prompt(memory);
+        let planner_result = self
+            .model
+            .complete(ModelRequest {
+                system_prompt: planner_prompt,
+                user_prompt: user_input.to_owned(),
+            })
+            .await
+            .ok()?;
+
+        parse_planner_output(&planner_result)
+    }
 }
 
 fn parse_search_command(content: &str) -> Option<&str> {
@@ -120,6 +161,71 @@ fn parse_search_command(content: &str) -> Option<&str> {
         .strip_prefix("/search ")
         .map(str::trim)
         .filter(|query| !query.is_empty())
+}
+
+fn heuristic_search_query(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    let lowered = trimmed.to_lowercase();
+    let triggers = [
+        "latest", "today", "current", "news", "price", "release", "update", "weather", "search",
+        "look up",
+    ];
+
+    if triggers.iter().any(|item| lowered.contains(item)) {
+        return Some(trimmed.to_owned());
+    }
+
+    None
+}
+
+fn build_search_planner_prompt(memory: &crate::types::MemoryContext) -> String {
+    let mut context = String::new();
+    if !memory.facts.is_empty() {
+        let facts = memory
+            .facts
+            .iter()
+            .map(|fact| format!("{}={}", fact.key, fact.value))
+            .collect::<Vec<_>>()
+            .join("; ");
+        context = format!("Known user facts: {facts}");
+    }
+
+    format!(
+        "You are a tool router for CompanionPilot.
+Decide whether web search is required to answer accurately.
+If search is required, produce a short search query.
+Return strict JSON with no markdown:
+{{\"use_search\": true|false, \"query\": \"...\"}}
+Set query to empty string when use_search is false.
+{}
+Rules:
+- Use search for time-sensitive, latest/current, news, prices, weather, or unknown factual claims.
+- Do not use search for casual conversation or personal memory recall.",
+        context
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchPlan {
+    use_search: bool,
+    query: String,
+}
+
+fn parse_planner_output(raw: &str) -> Option<String> {
+    let candidate = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let plan = serde_json::from_str::<SearchPlan>(candidate).ok()?;
+    if plan.use_search {
+        let query = plan.query.trim();
+        if !query.is_empty() {
+            return Some(query.to_owned());
+        }
+    }
+    None
 }
 
 fn build_system_prompt(memory: &crate::types::MemoryContext) -> String {
@@ -241,5 +347,31 @@ mod tests {
         assert!(err.contains("web_search tool is not configured"));
 
         let _ = json!({});
+    }
+
+    #[tokio::test]
+    async fn auto_search_uses_tool_on_latest_question() {
+        let memory = Arc::new(InMemoryMemoryStore::default());
+        let orchestrator = DefaultChatOrchestrator::new(
+            Arc::new(MockModelProvider),
+            memory,
+            Arc::new(ToolRegistry::default()),
+            SafetyPolicy::default(),
+        );
+
+        let result = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "3".into(),
+                user_id: "u3".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "What is the latest Rust release today?".into(),
+                timestamp: Utc::now(),
+            })
+            .await;
+
+        assert!(result.is_err());
+        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains("web_search tool is not configured"));
     }
 }

@@ -65,7 +65,8 @@ http://localhost:8080/app
 
 - Set `DISCORD_TOKEN` in `.env`.
 - Mention the bot or DM it.
-- Use `/search <query>` in Discord to trigger tool execution.
+- Use `/search <query>` in Discord as a manual search override.
+- CompanionPilot can also decide to run web search automatically for time-sensitive/factual questions.
 
 ## Notes
 
