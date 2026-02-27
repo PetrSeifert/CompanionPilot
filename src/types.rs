@@ -97,3 +97,17 @@ pub struct ToolCallRecord {
     pub error: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannerDecisionRecord {
+    pub user_id: String,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub planner: String,
+    pub decision: String,
+    pub rationale: String,
+    pub payload_json: String,
+    pub success: bool,
+    pub error: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}

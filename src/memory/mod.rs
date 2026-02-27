@@ -4,7 +4,8 @@ mod postgres;
 use async_trait::async_trait;
 
 use crate::types::{
-    ChatMessageRecord, MemoryContext, MemoryFact, ToolCallRecord, UserDashboardSummary,
+    ChatMessageRecord, MemoryContext, MemoryFact, PlannerDecisionRecord, ToolCallRecord,
+    UserDashboardSummary,
 };
 
 pub use in_memory::InMemoryMemoryStore;
@@ -47,4 +48,12 @@ pub trait MemoryStore: Send + Sync {
         user_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<ToolCallRecord>>;
+
+    async fn record_planner_decision(&self, decision: PlannerDecisionRecord) -> anyhow::Result<()>;
+
+    async fn list_planner_decisions(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PlannerDecisionRecord>>;
 }

@@ -12,6 +12,7 @@ CompanionPilot is a Rust-first AI orchestrator for Discord chat with long/short-
 - HTTP API for health, chat, and dashboard data (`axum`)
 - Built-in web dashboard at `/app` for users/memory/chats
 - Dashboard now includes tool-call history (query, result/error, source)
+- Dashboard now includes planner decision history (search/memory decisions)
 - Local dev infra (`docker-compose` with Postgres + Redis)
 - Railway deployment entry (`railway.json`)
 
@@ -35,6 +36,7 @@ docker compose up -d
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0001_init.sql
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0002_chat_messages.sql
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0003_tool_call_logs.sql
+psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0004_planner_decision_logs.sql
 ```
 
 4. Run the service:

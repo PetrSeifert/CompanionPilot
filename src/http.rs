@@ -76,6 +76,10 @@ pub fn router(state: AppState) -> Router {
             get(list_user_tool_calls),
         )
         .route(
+            "/api/dashboard/users/{user_id}/planners",
+            get(list_user_planner_decisions),
+        )
+        .route(
             "/api/dashboard/users/{user_id}/chat",
             post(send_dashboard_message),
         )
@@ -170,6 +174,20 @@ async fn list_user_tool_calls(
         .await
         .map_err(internal_error)?;
     Ok(Json(calls))
+}
+
+async fn list_user_planner_decisions(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Query(query): Query<LimitQuery>,
+) -> Result<Json<Vec<crate::types::PlannerDecisionRecord>>, (axum::http::StatusCode, String)> {
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let decisions = state
+        .memory
+        .list_planner_decisions(&user_id, limit)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(decisions))
 }
 
 async fn send_dashboard_message(
@@ -325,7 +343,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     .user-id { font-size: .9rem; font-family: "IBM Plex Mono", monospace; }
     .user-meta { color: var(--muted); font-size: .78rem; margin-top: 5px; }
 
-    .memory-list, .chat-list, .tool-list {
+    .memory-list, .chat-list, .tool-list, .planner-list {
       padding: 10px 12px 14px;
       max-height: 42vh;
       overflow: auto;
@@ -333,7 +351,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
 
     .stack {
       display: grid;
-      grid-template-rows: 1fr 1fr;
+      grid-template-rows: 1fr 1fr 1fr;
       gap: 0;
       height: 100%;
     }
@@ -411,6 +429,25 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       line-height: 1.3;
       margin-top: 4px;
     }
+
+    .planner-item {
+      background: var(--panel-bright);
+      border: 1px solid rgba(140,180,210,.25);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .planner-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: .8rem;
+    }
+    .planner-name { color: var(--accent-2); }
+    .planner-decision { color: var(--text); }
 
     .chat-row {
       margin-bottom: 10px;
@@ -521,6 +558,10 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
             <h3 class="subpanel-title">Tool Calls</h3>
             <div id="toolcalls" class="tool-list"></div>
           </div>
+          <div>
+            <h3 class="subpanel-title">Planner Decisions</h3>
+            <div id="planners" class="planner-list"></div>
+          </div>
         </div>
       </article>
     </section>
@@ -530,6 +571,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     const usersEl = document.getElementById("users");
     const factsEl = document.getElementById("facts");
     const toolCallsEl = document.getElementById("toolcalls");
+    const plannersEl = document.getElementById("planners");
     const chatEl = document.getElementById("chat");
     const statusEl = document.getElementById("status");
     const sendBtn = document.getElementById("send");
@@ -576,6 +618,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         usersEl.innerHTML = '<div class="empty">No users yet. Send a message via Discord or /chat first.</div>';
         factsEl.innerHTML = '<div class="empty">No memory facts loaded.</div>';
         toolCallsEl.innerHTML = '<div class="empty">No tool calls recorded.</div>';
+        plannersEl.innerHTML = '<div class="empty">No planner decisions recorded.</div>';
         chatEl.innerHTML = '<div class="empty">No chat history loaded.</div>';
         selectedUser = null;
         return;
@@ -605,15 +648,17 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     async function renderSelectedUser() {
       if (!selectedUser) return;
 
-      const [factsResp, chatsResp, toolCallsResp] = await Promise.all([
+      const [factsResp, chatsResp, toolCallsResp, plannersResp] = await Promise.all([
         fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/facts?limit=200`),
         fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/chats?limit=300`),
-        fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/toolcalls?limit=200`)
+        fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/toolcalls?limit=200`),
+        fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/planners?limit=250`)
       ]);
 
       const facts = await factsResp.json();
       const chats = await chatsResp.json();
       const toolCalls = await toolCallsResp.json();
+      const plannerDecisions = await plannersResp.json();
 
       factsEl.innerHTML = facts.length
         ? facts.map((f) => `
@@ -650,6 +695,22 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
             </div>
           `).join("")
         : '<div class="empty">No tool calls for this user.</div>';
+
+      plannersEl.innerHTML = plannerDecisions.length
+        ? plannerDecisions.map((entry) => `
+            <div class="planner-item">
+              <div class="planner-head">
+                <span class="planner-name">${escapeHtml(entry.planner)}</span>
+                <span class="planner-decision">${escapeHtml(entry.decision)}</span>
+                <span class="tool-status ${entry.success ? "ok" : "err"}">${entry.success ? "ok" : "error"}</span>
+              </div>
+              <div class="tool-query">reason: ${escapeHtml(entry.rationale)}</div>
+              <div class="tool-result">${escapeHtml(entry.payload_json)}</div>
+              ${entry.error ? `<div class="error">${escapeHtml(entry.error)}</div>` : ""}
+              <div class="fact-meta">${fmtDate(entry.timestamp)}</div>
+            </div>
+          `).join("")
+        : '<div class="empty">No planner decisions for this user.</div>';
 
       chatEl.scrollTop = chatEl.scrollHeight;
     }

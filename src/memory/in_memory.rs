@@ -5,7 +5,8 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 
 use crate::types::{
-    ChatMessageRecord, MemoryContext, MemoryFact, ToolCallRecord, UserDashboardSummary,
+    ChatMessageRecord, MemoryContext, MemoryFact, PlannerDecisionRecord, ToolCallRecord,
+    UserDashboardSummary,
 };
 
 use super::MemoryStore;
@@ -16,6 +17,7 @@ pub struct InMemoryMemoryStore {
     summaries: Arc<RwLock<HashMap<String, String>>>,
     chats: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
     tool_calls: Arc<RwLock<HashMap<String, Vec<ToolCallRecord>>>>,
+    planner_decisions: Arc<RwLock<HashMap<String, Vec<PlannerDecisionRecord>>>>,
 }
 
 #[async_trait]
@@ -203,5 +205,32 @@ impl MemoryStore for InMemoryMemoryStore {
             calls = calls.split_off(start);
         }
         Ok(calls)
+    }
+
+    async fn record_planner_decision(&self, decision: PlannerDecisionRecord) -> anyhow::Result<()> {
+        let user_id = decision.user_id.clone();
+        let mut decisions = self.planner_decisions.write().await;
+        decisions.entry(user_id).or_default().push(decision);
+        Ok(())
+    }
+
+    async fn list_planner_decisions(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PlannerDecisionRecord>> {
+        let mut decisions = self
+            .planner_decisions
+            .read()
+            .await
+            .get(user_id)
+            .cloned()
+            .unwrap_or_default();
+        decisions.sort_by_key(|decision| decision.timestamp);
+        if decisions.len() > limit {
+            let start = decisions.len().saturating_sub(limit);
+            decisions = decisions.split_off(start);
+        }
+        Ok(decisions)
     }
 }

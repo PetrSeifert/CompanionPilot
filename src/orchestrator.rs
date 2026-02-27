@@ -11,8 +11,8 @@ use crate::{
     safety::SafetyPolicy,
     tools::ToolExecutor,
     types::{
-        ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, OrchestratorReply, ToolCall,
-        ToolCallRecord,
+        ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, OrchestratorReply,
+        PlannerDecisionRecord, ToolCall, ToolCallRecord,
     },
 };
 
@@ -29,8 +29,14 @@ enum SearchDecision {
 }
 
 enum MemoryDecision {
-    Store(MemoryFact),
-    Skip { reason: &'static str },
+    Store {
+        fact: MemoryFact,
+        rationale: &'static str,
+    },
+    Skip {
+        reason: &'static str,
+        error: Option<String>,
+    },
 }
 
 impl DefaultChatOrchestrator {
@@ -74,6 +80,8 @@ impl DefaultChatOrchestrator {
             self.decide_search_query(&ctx.content, &memory_context)
                 .await
         };
+        self.record_search_planner_decision(&ctx, &search_decision)
+            .await;
 
         if let SearchDecision::Use { query, source } = search_decision {
             info!(
@@ -189,21 +197,43 @@ impl DefaultChatOrchestrator {
             .await?;
 
         match self.decide_memory_fact(&ctx.content, &memory_context).await {
-            MemoryDecision::Store(fact) => {
+            MemoryDecision::Store { fact, rationale } => {
                 info!(
                     user_id = %ctx.user_id,
                     memory_key = %fact.key,
                     confidence = fact.confidence,
                     "memory fact stored"
                 );
+                self.record_memory_planner_decision(
+                    &ctx,
+                    "store",
+                    rationale,
+                    &json!({
+                        "key": fact.key,
+                        "value": fact.value,
+                        "confidence": fact.confidence
+                    }),
+                    true,
+                    None,
+                )
+                .await;
                 self.memory.upsert_fact(&ctx.user_id, fact).await?;
             }
-            MemoryDecision::Skip { reason } => {
+            MemoryDecision::Skip { reason, error } => {
                 debug!(
                     user_id = %ctx.user_id,
                     reason,
                     "memory write skipped"
                 );
+                self.record_memory_planner_decision(
+                    &ctx,
+                    "skip",
+                    reason,
+                    &json!({}),
+                    error.is_none(),
+                    error,
+                )
+                .await;
             }
         }
 
@@ -340,6 +370,7 @@ impl DefaultChatOrchestrator {
                 warn!(?error, "memory planner model call failed");
                 return MemoryDecision::Skip {
                     reason: "planner_model_error",
+                    error: Some(error.to_string()),
                 };
             }
         };
@@ -349,6 +380,7 @@ impl DefaultChatOrchestrator {
                 if !plan.store {
                     return MemoryDecision::Skip {
                         reason: "planner_no_store",
+                        error: None,
                     };
                 }
 
@@ -357,16 +389,20 @@ impl DefaultChatOrchestrator {
                 if key.is_empty() || value.is_empty() {
                     return MemoryDecision::Skip {
                         reason: "planner_invalid_fact",
+                        error: None,
                     };
                 }
 
-                MemoryDecision::Store(MemoryFact {
-                    key,
-                    value,
-                    confidence: plan.confidence.clamp(0.0, 1.0),
-                    source: "user_message".to_owned(),
-                    updated_at: Utc::now(),
-                })
+                MemoryDecision::Store {
+                    fact: MemoryFact {
+                        key,
+                        value,
+                        confidence: plan.confidence.clamp(0.0, 1.0),
+                        source: "user_message".to_owned(),
+                        updated_at: Utc::now(),
+                    },
+                    rationale: "model_planner",
+                }
             }
             Err(error) => {
                 warn!(
@@ -376,6 +412,7 @@ impl DefaultChatOrchestrator {
                 );
                 MemoryDecision::Skip {
                     reason: "planner_parse_error",
+                    error: Some(error.to_string()),
                 }
             }
         }
@@ -384,6 +421,78 @@ impl DefaultChatOrchestrator {
     async fn record_tool_call(&self, call: ToolCallRecord) {
         if let Err(error) = self.memory.record_tool_call(call).await {
             warn!(?error, "failed to persist tool call log");
+        }
+    }
+
+    async fn record_search_planner_decision(&self, ctx: &MessageCtx, decision: &SearchDecision) {
+        let (decision_value, rationale, payload, success, error) = match decision {
+            SearchDecision::Use { query, source } => (
+                "use_search",
+                *source,
+                json!({
+                    "query": query
+                }),
+                true,
+                None,
+            ),
+            SearchDecision::Skip { reason } => (
+                "skip_search",
+                *reason,
+                json!({}),
+                !reason.starts_with("planner_"),
+                if reason.starts_with("planner_") {
+                    Some((*reason).to_owned())
+                } else {
+                    None
+                },
+            ),
+        };
+
+        let record = PlannerDecisionRecord {
+            user_id: ctx.user_id.clone(),
+            guild_id: ctx.guild_id.clone(),
+            channel_id: ctx.channel_id.clone(),
+            planner: "search".to_owned(),
+            decision: decision_value.to_owned(),
+            rationale: rationale.to_owned(),
+            payload_json: payload.to_string(),
+            success,
+            error,
+            timestamp: Utc::now(),
+        };
+
+        if let Err(error) = self.memory.record_planner_decision(record).await {
+            warn!(?error, "failed to persist search planner decision log");
+        }
+    }
+
+    async fn record_memory_planner_decision(
+        &self,
+        ctx: &MessageCtx,
+        decision: &str,
+        rationale: &str,
+        payload: &serde_json::Value,
+        success: bool,
+        error: Option<String>,
+    ) {
+        let record = PlannerDecisionRecord {
+            user_id: ctx.user_id.clone(),
+            guild_id: ctx.guild_id.clone(),
+            channel_id: ctx.channel_id.clone(),
+            planner: "memory".to_owned(),
+            decision: decision.to_owned(),
+            rationale: rationale.to_owned(),
+            payload_json: payload.to_string(),
+            success,
+            error,
+            timestamp: Utc::now(),
+        };
+
+        if let Err(store_error) = self.memory.record_planner_decision(record).await {
+            warn!(
+                ?store_error,
+                "failed to persist memory planner decision log"
+            );
         }
     }
 }
