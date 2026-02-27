@@ -74,3 +74,18 @@ http://localhost:8080/app
 - If `DATABASE_URL` is missing, memory uses in-process storage.
 - If `TAVILY_API_KEY` is missing, `/search` returns a configuration error.
 - Dashboard endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
+
+## Search diagnostics
+
+To inspect search behavior in logs, set:
+
+```bash
+RUST_LOG=companionpilot=debug,info
+```
+
+Then look for:
+
+- `web search selected` (decision + query + source)
+- `web search tool completed` (search finished)
+- `tavily web search start` / `tavily web search success` (actual Tavily call path)
+- `web search skipped` (why it was not used)

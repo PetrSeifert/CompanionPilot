@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::{debug, info, warn};
 
 use super::ToolResult;
 
@@ -29,6 +30,9 @@ impl TavilyWebSearchTool {
             .unwrap_or(5)
             .clamp(1, 10);
 
+        info!(max_results, "tavily web search start");
+        debug!(query = %query, "tavily query");
+
         let payload = TavilyRequest {
             api_key: &self.api_key,
             query,
@@ -41,10 +45,28 @@ impl TavilyWebSearchTool {
             .post("https://api.tavily.com/search")
             .json(&payload)
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .map_err(|error| {
+                warn!(?error, "tavily request failed");
+                error
+            })?
+            .error_for_status()
+            .map_err(|error| {
+                warn!(?error, "tavily returned error status");
+                error
+            })?
             .json::<TavilyResponse>()
-            .await?;
+            .await
+            .map_err(|error| {
+                warn!(?error, "failed to deserialize tavily response");
+                error
+            })?;
+
+        info!(
+            result_count = response.results.len(),
+            has_answer = response.answer.is_some(),
+            "tavily web search success"
+        );
 
         let mut citations = Vec::new();
         let mut lines = Vec::new();

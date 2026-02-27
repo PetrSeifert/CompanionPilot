@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
+use tracing::{debug, info, warn};
 
 use crate::{
     memory::MemoryStore,
@@ -17,6 +18,11 @@ pub struct DefaultChatOrchestrator {
     memory: Arc<dyn MemoryStore>,
     tools: Arc<dyn ToolExecutor>,
     safety: SafetyPolicy,
+}
+
+enum SearchDecision {
+    Use { query: String, source: &'static str },
+    Skip { reason: &'static str },
 }
 
 impl DefaultChatOrchestrator {
@@ -52,19 +58,47 @@ impl DefaultChatOrchestrator {
             .load_context(&ctx.user_id, &ctx.guild_id, &ctx.channel_id)
             .await?;
 
-        let search_query = if let Some(manual) = parse_search_command(&ctx.content) {
-            Some(manual.to_owned())
+        let search_decision = if let Some(manual) = parse_search_command(&ctx.content) {
+            SearchDecision::Use {
+                query: manual.to_owned(),
+                source: "manual_prefix",
+            }
         } else {
             self.decide_search_query(&ctx.content, &memory_context)
                 .await
         };
 
-        if let Some(query) = search_query {
+        if let SearchDecision::Use { query, source } = search_decision {
+            info!(
+                user_id = %ctx.user_id,
+                guild_id = %ctx.guild_id,
+                channel_id = %ctx.channel_id,
+                source,
+                query = %query,
+                "web search selected"
+            );
             let args = json!({
                 "query": query,
                 "max_results": 5
             });
-            let tool_result = self.tools.execute("web_search", args.clone()).await?;
+            let tool_result = match self.tools.execute("web_search", args.clone()).await {
+                Ok(result) => result,
+                Err(error) => {
+                    warn!(
+                        user_id = %ctx.user_id,
+                        guild_id = %ctx.guild_id,
+                        channel_id = %ctx.channel_id,
+                        ?error,
+                        "web search tool failed"
+                    );
+                    return Err(error);
+                }
+            };
+            info!(
+                user_id = %ctx.user_id,
+                result_citations = tool_result.citations.len(),
+                "web search tool completed"
+            );
             let final_text = self
                 .model
                 .complete(ModelRequest {
@@ -96,6 +130,15 @@ impl DefaultChatOrchestrator {
                 })
                 .await?;
             return Ok(reply);
+        }
+        if let SearchDecision::Skip { reason } = search_decision {
+            debug!(
+                user_id = %ctx.user_id,
+                guild_id = %ctx.guild_id,
+                channel_id = %ctx.channel_id,
+                reason,
+                "web search skipped"
+            );
         }
 
         let system_prompt = build_system_prompt(&memory_context);
@@ -136,9 +179,12 @@ impl DefaultChatOrchestrator {
         &self,
         user_input: &str,
         memory: &crate::types::MemoryContext,
-    ) -> Option<String> {
+    ) -> SearchDecision {
         if let Some(query) = heuristic_search_query(user_input) {
-            return Some(query);
+            return SearchDecision::Use {
+                query,
+                source: "heuristic",
+            };
         }
 
         let planner_prompt = build_search_planner_prompt(memory);
@@ -148,10 +194,47 @@ impl DefaultChatOrchestrator {
                 system_prompt: planner_prompt,
                 user_prompt: user_input.to_owned(),
             })
-            .await
-            .ok()?;
+            .await;
 
-        parse_planner_output(&planner_result)
+        let planner_result = match planner_result {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(?error, "search planner model call failed");
+                return SearchDecision::Skip {
+                    reason: "planner_model_error",
+                };
+            }
+        };
+
+        match parse_planner_output(&planner_result) {
+            Ok(plan) => {
+                if !plan.use_search {
+                    return SearchDecision::Skip {
+                        reason: "planner_no_search",
+                    };
+                }
+                let query = plan.query.trim();
+                if query.is_empty() {
+                    return SearchDecision::Skip {
+                        reason: "planner_empty_query",
+                    };
+                }
+                SearchDecision::Use {
+                    query: query.to_owned(),
+                    source: "model_planner",
+                }
+            }
+            Err(error) => {
+                warn!(
+                    ?error,
+                    planner_output = %truncate_for_log(&planner_result, 220),
+                    "failed to parse search planner output"
+                );
+                SearchDecision::Skip {
+                    reason: "planner_parse_error",
+                }
+            }
+        }
     }
 }
 
@@ -211,21 +294,23 @@ struct SearchPlan {
     query: String,
 }
 
-fn parse_planner_output(raw: &str) -> Option<String> {
+fn parse_planner_output(raw: &str) -> Result<SearchPlan, serde_json::Error> {
     let candidate = raw
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    let plan = serde_json::from_str::<SearchPlan>(candidate).ok()?;
-    if plan.use_search {
-        let query = plan.query.trim();
-        if !query.is_empty() {
-            return Some(query.to_owned());
-        }
+    serde_json::from_str::<SearchPlan>(candidate)
+}
+
+fn truncate_for_log(input: &str, max_len: usize) -> String {
+    let mut result = input.replace('\n', "\\n");
+    if result.len() > max_len {
+        result.truncate(max_len);
+        result.push_str("...");
     }
-    None
+    result
 }
 
 fn build_system_prompt(memory: &crate::types::MemoryContext) -> String {
