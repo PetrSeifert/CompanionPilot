@@ -5,7 +5,7 @@ use companionpilot::{
     discord_bot,
     http::{self, AppState},
     memory::{InMemoryMemoryStore, MemoryStore, PostgresMemoryStore},
-    model::{MockModelProvider, ModelProvider, OpenAiProvider},
+    model::{MockModelProvider, ModelProvider, OpenRouterProvider},
     orchestrator::DefaultChatOrchestrator,
     safety::SafetyPolicy,
     tools::{TavilyWebSearchTool, ToolExecutor, ToolRegistry},
@@ -68,11 +68,59 @@ fn init_tracing() {
 }
 
 fn build_model_provider(config: &AppConfig) -> Arc<dyn ModelProvider> {
-    if let Some(api_key) = config.openai_api_key.clone() {
-        Arc::new(OpenAiProvider::new(api_key, config.openai_model.clone()))
-    } else {
-        warn!("OPENAI_API_KEY not set; using mock model provider");
-        Arc::new(MockModelProvider)
+    let provider = config.model_provider.to_lowercase();
+    match provider.as_str() {
+        "openrouter" => {
+            if let Some(api_key) = config.openrouter_api_key.clone() {
+                info!(model = %config.openrouter_model, "using OpenRouter model provider");
+                Arc::new(OpenRouterProvider::new(
+                    api_key,
+                    config.openrouter_model.clone(),
+                    config.openrouter_referer.clone(),
+                    config.openrouter_title.clone(),
+                ))
+            } else {
+                warn!("MODEL_PROVIDER=openrouter but OPENROUTER_API_KEY is missing; using mock");
+                Arc::new(MockModelProvider)
+            }
+        }
+        "mock" => {
+            warn!("MODEL_PROVIDER=mock; using mock model provider");
+            Arc::new(MockModelProvider)
+        }
+        "auto" => {
+            if let Some(api_key) = config.openrouter_api_key.clone() {
+                info!(
+                    model = %config.openrouter_model,
+                    "using OpenRouter model provider (auto mode)"
+                );
+                Arc::new(OpenRouterProvider::new(
+                    api_key,
+                    config.openrouter_model.clone(),
+                    config.openrouter_referer.clone(),
+                    config.openrouter_title.clone(),
+                ))
+            } else {
+                warn!("No OPENROUTER_API_KEY configured; using mock model provider");
+                Arc::new(MockModelProvider)
+            }
+        }
+        other => {
+            warn!(
+                provider = %other,
+                "unknown MODEL_PROVIDER value; valid values are auto|openrouter|mock; falling back to auto"
+            );
+            if let Some(api_key) = config.openrouter_api_key.clone() {
+                Arc::new(OpenRouterProvider::new(
+                    api_key,
+                    config.openrouter_model.clone(),
+                    config.openrouter_referer.clone(),
+                    config.openrouter_title.clone(),
+                ))
+            } else {
+                Arc::new(MockModelProvider)
+            }
+        }
     }
 }
 

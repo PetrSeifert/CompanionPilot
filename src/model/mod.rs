@@ -1,10 +1,10 @@
 mod mock;
-mod openai;
+mod openrouter;
 
 use async_trait::async_trait;
 
 pub use mock::MockModelProvider;
-pub use openai::OpenAiProvider;
+pub use openrouter::OpenRouterProvider;
 
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
