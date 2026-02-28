@@ -268,6 +268,14 @@ impl MemoryStore for PostgresMemoryStore {
         Ok(result.rows_affected())
     }
 
+    async fn clear_facts(&self, user_id: &str) -> anyhow::Result<u64> {
+        let result = sqlx::query("DELETE FROM memory_facts WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     async fn clear_tool_calls(&self, user_id: &str) -> anyhow::Result<u64> {
         let result = sqlx::query("DELETE FROM tool_call_logs WHERE user_id = $1")
             .bind(user_id)

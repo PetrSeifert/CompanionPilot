@@ -22,9 +22,9 @@ async fn main() -> anyhow::Result<()> {
 
     let model = build_model_provider(&config);
     let memory = build_memory_store(&config).await?;
-    let dashboard_memory = memory.clone();
     let tools = build_tools(&config);
 
+    let memory_for_dashboard = memory.clone();
     let orchestrator = Arc::new(DefaultChatOrchestrator::new(
         model,
         memory,
@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = http::router(AppState {
         orchestrator,
-        memory: dashboard_memory,
+        memory: memory_for_dashboard,
     });
     let listener = TcpListener::bind(config.http_bind).await?;
     info!("CompanionPilot HTTP API listening on {}", config.http_bind);

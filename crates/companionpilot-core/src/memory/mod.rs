@@ -47,6 +47,8 @@ pub trait MemoryStore: Send + Sync {
 
     async fn clear_tool_calls(&self, user_id: &str) -> anyhow::Result<u64>;
 
+    async fn clear_facts(&self, user_id: &str) -> anyhow::Result<u64>;
+
     async fn clear_planner_decisions(&self, user_id: &str) -> anyhow::Result<u64>;
 
     async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>>;

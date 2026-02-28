@@ -15,11 +15,7 @@ Workspace layout:
 - Memory abstraction (`PostgresMemoryStore`, `InMemoryMemoryStore`)
 - Tool runtime with Tavily web search support
 - Built-in `current_datetime` tool for UTC date/time grounding
-- HTTP API for health, chat, and dashboard data (`axum`)
-- Built-in web dashboard at `/app` for users/memory/chats
-- Dashboard now includes tool-call history (query, result/error, source)
-- Dashboard now includes planner decision history (unified tool+memory decisions)
-- Dashboard supports manual memory fact add/update/delete and conversation message deletion/clear
+- HTTP API for health and chat (`axum`)
 - Reply timing telemetry (planner/tools/model/memory stage durations)
 - Local dev infra (`docker-compose` with Postgres + Redis)
 - Railway deployment entry (`railway.json`)
@@ -67,12 +63,6 @@ curl -X POST http://localhost:8080/chat \
   -d '{"user_id":"demo","content":"my name is Petr"}'
 ```
 
-7. Open the dashboard:
-
-```bash
-http://localhost:8080/app
-```
-
 ## Discord usage
 
 - Set `DISCORD_TOKEN` in `.env`.
@@ -103,7 +93,7 @@ OpenRouter settings:
 - If `OPENROUTER_API_KEY` is missing (or provider is `mock`), the app uses the mock model provider.
 - If `DATABASE_URL` is missing, memory uses in-process storage.
 - If `TAVILY_API_KEY` is missing, planner-selected `web_search` calls return a configuration error.
-- Dashboard endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
+- HTTP endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
 
 ## Search diagnostics
 

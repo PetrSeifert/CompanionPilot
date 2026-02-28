@@ -189,6 +189,15 @@ impl MemoryStore for InMemoryMemoryStore {
         Ok(removed)
     }
 
+    async fn clear_facts(&self, user_id: &str) -> anyhow::Result<u64> {
+        let mut facts = self.facts.write().await;
+        let removed = facts
+            .remove(user_id)
+            .map(|list| list.len() as u64)
+            .unwrap_or(0);
+        Ok(removed)
+    }
+
     async fn clear_tool_calls(&self, user_id: &str) -> anyhow::Result<u64> {
         let mut tool_calls = self.tool_calls.write().await;
         let removed = tool_calls
