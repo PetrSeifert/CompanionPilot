@@ -516,10 +516,15 @@ body::before {
   border: none;
 }
 
-.msg-content pre .code-lang {
+.msg-content pre .code-toolbar {
   position: absolute;
   top: 0;
   right: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.msg-content pre .code-lang {
   font-family: var(--font-mono);
   font-size: 0.55rem;
   letter-spacing: 1px;
@@ -529,7 +534,47 @@ body::before {
   border-left: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   padding: 2px 8px;
+  display: flex;
+  align-items: center;
 }
+
+.msg-content pre .btn-copy-code {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: var(--bg-panel);
+  border: none;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.msg-content pre .btn-copy-code:hover {
+  color: var(--amber);
+  background: var(--bg-surface);
+}
+
+.msg-content pre .btn-copy-code.copied {
+  color: var(--teal);
+}
+
+/* ===== SYNTAX HIGHLIGHTING ===== */
+.hl-keyword { color: #c678dd; }
+.hl-type { color: #e5c07b; }
+.hl-string { color: #98c379; }
+.hl-number { color: #d19a66; }
+.hl-comment { color: #5c6370; font-style: italic; }
+.hl-function { color: #61afef; }
+.hl-macro { color: #56b6c2; }
+.hl-attribute { color: #c678dd; font-style: italic; }
+.hl-operator { color: #abb2bf; }
+.hl-punctuation { color: #7a7e85; }
+.hl-lifetime { color: #d19a66; font-style: italic; }
+.hl-constant { color: #d19a66; text-transform: none; }
 
 .msg-content code {
   font-family: var(--font-mono);
@@ -1290,6 +1335,151 @@ pre.json-block {
       .replace(/"/g, '&quot;');
   }
 
+  // ===== SYNTAX HIGHLIGHTING =====
+  const hlLangs = {
+    rust: {
+      keywords: 'as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while yield'.split(' '),
+      types: 'bool char str i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 String Vec Option Result Box Arc Rc HashMap HashSet BTreeMap BTreeSet VecDeque'.split(' '),
+      comment: /\/\/.*$|\/\*[\s\S]*?\*\//gm,
+      string: /"(?:[^"\\]|\\.)*"|r#*"[\s\S]*?"#*/g,
+      attribute: /#\[[\s\S]*?\]/g,
+      lifetime: /'\w+/g,
+      macro: /\b\w+!/g,
+    },
+    javascript: {
+      keywords: 'async await break case catch class const continue debugger default delete do else export extends false finally for from function if import in instanceof let new null of return static super switch this throw true try typeof undefined var void while with yield'.split(' '),
+      types: 'Array Boolean Date Error Function JSON Map Math Number Object Promise Proxy RegExp Set String Symbol WeakMap WeakSet'.split(' '),
+      comment: /\/\/.*$|\/\*[\s\S]*?\*\//gm,
+      string: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g,
+    },
+    python: {
+      keywords: 'False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield'.split(' '),
+      types: 'int float str bool list dict tuple set frozenset bytes bytearray range type object'.split(' '),
+      comment: /#.*$/gm,
+      string: /"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g,
+    },
+    go: {
+      keywords: 'break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var'.split(' '),
+      types: 'bool byte complex64 complex128 error float32 float64 int int8 int16 int32 int64 rune string uint uint8 uint16 uint32 uint64 uintptr'.split(' '),
+      comment: /\/\/.*$|\/\*[\s\S]*?\*\//gm,
+      string: /"(?:[^"\\]|\\.)*"|`[^`]*`/g,
+    },
+    typescript: {
+      keywords: 'abstract any async await break case catch class const continue debugger declare default delete do else enum export extends false finally for from function get if implements import in infer instanceof interface keyof let module namespace never new null of package private protected public readonly return set static super switch this throw true try type typeof undefined var void while with yield'.split(' '),
+      types: 'Array Boolean Date Error Function JSON Map Math Number Object Promise Proxy RegExp Set String Symbol WeakMap WeakSet Record Partial Required Readonly Pick Omit Exclude Extract'.split(' '),
+      comment: /\/\/.*$|\/\*[\s\S]*?\*\//gm,
+      string: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g,
+    },
+    sql: {
+      keywords: 'SELECT FROM WHERE INSERT INTO VALUES UPDATE SET DELETE CREATE DROP ALTER TABLE INDEX VIEW JOIN LEFT RIGHT INNER OUTER ON AND OR NOT IN IS NULL LIKE BETWEEN EXISTS HAVING GROUP BY ORDER ASC DESC LIMIT OFFSET UNION ALL DISTINCT AS CASE WHEN THEN ELSE END COUNT SUM AVG MIN MAX COALESCE'.split(' '),
+      types: 'INT INTEGER BIGINT SMALLINT FLOAT DOUBLE DECIMAL NUMERIC CHAR VARCHAR TEXT BLOB BOOLEAN DATE TIMESTAMP SERIAL PRIMARY KEY FOREIGN REFERENCES DEFAULT'.split(' '),
+      comment: /--.*$/gm,
+      string: /'(?:[^'\\]|\\.)*'/g,
+    },
+  };
+  // Aliases
+  hlLangs.js = hlLangs.javascript;
+  hlLangs.ts = hlLangs.typescript;
+  hlLangs.py = hlLangs.python;
+  hlLangs.rs = hlLangs.rust;
+
+  function highlightCode(escaped, lang) {
+    const def = hlLangs[lang];
+    if (!def) return highlightGeneric(escaped);
+
+    // Collect protected spans (comments, strings, attributes) first
+    const tokens = [];
+    let src = escaped;
+
+    function extract(regex, cls) {
+      src = src.replace(regex, (match, offset) => {
+        const placeholder = '\x01' + tokens.length + '\x01';
+        tokens.push('<span class="' + cls + '">' + match + '</span>');
+        return placeholder;
+      });
+    }
+
+    // Order matters: strings and comments first to protect their contents
+    if (def.attribute) extract(def.attribute, 'hl-attribute');
+    if (def.comment) extract(def.comment, 'hl-comment');
+    if (def.string) extract(def.string, 'hl-string');
+    if (def.lifetime) extract(def.lifetime, 'hl-lifetime');
+    if (def.macro) extract(def.macro, 'hl-macro');
+
+    // Numbers
+    src = src.replace(/\b(\d+\.?\d*(?:e[+-]?\d+)?(?:_\d+)*[fui]?\d*)\b/gi, '<span class="hl-number">$1</span>');
+
+    // Types (capitalized or from list)
+    if (def.types) {
+      const typeRe = new RegExp('\\b(' + def.types.join('|') + ')\\b', 'g');
+      src = src.replace(typeRe, '<span class="hl-type">$1</span>');
+    }
+
+    // Keywords
+    if (def.keywords) {
+      const kwRe = new RegExp('\\b(' + def.keywords.join('|') + ')\\b', 'g');
+      src = src.replace(kwRe, '<span class="hl-keyword">$1</span>');
+    }
+
+    // Function calls: word followed by (
+    src = src.replace(/\b([a-zA-Z_]\w*)\s*(?=\()/g, (match, name) => {
+      // Don't re-highlight if already wrapped or is a keyword/type
+      if (def.keywords && def.keywords.includes(name)) return match;
+      if (def.types && def.types.includes(name)) return match;
+      return '<span class="hl-function">' + name + '</span>';
+    });
+
+    // Restore protected tokens
+    src = src.replace(/\x01(\d+)\x01/g, (_, idx) => tokens[parseInt(idx)]);
+
+    return src;
+  }
+
+  function highlightGeneric(escaped) {
+    const tokens = [];
+    let src = escaped;
+
+    // Comments
+    src = src.replace(/(\/\/.*$|\/\*[\s\S]*?\*\/|#.*$)/gm, m => {
+      const p = '\x01' + tokens.length + '\x01';
+      tokens.push('<span class="hl-comment">' + m + '</span>');
+      return p;
+    });
+    // Strings
+    src = src.replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, m => {
+      const p = '\x01' + tokens.length + '\x01';
+      tokens.push('<span class="hl-string">' + m + '</span>');
+      return p;
+    });
+    // Numbers
+    src = src.replace(/\b(\d+\.?\d*)\b/g, '<span class="hl-number">$1</span>');
+    // Common keywords
+    src = src.replace(/\b(function|return|if|else|for|while|class|import|export|from|const|let|var|def|fn|pub|use|struct|impl|trait|async|await|true|false|null|None|self)\b/g, '<span class="hl-keyword">$1</span>');
+
+    src = src.replace(/\x01(\d+)\x01/g, (_, idx) => tokens[parseInt(idx)]);
+    return src;
+  }
+
+  // Copy code to clipboard — via event delegation
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-copy-code');
+    if (!btn) return;
+    const pre = btn.closest('pre');
+    const code = pre.querySelector('code');
+    const text = code.textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'COPIED';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'COPY';
+        btn.classList.remove('copied');
+      }, 2000);
+    }).catch(() => {
+      btn.textContent = 'FAILED';
+      setTimeout(() => { btn.textContent = 'COPY'; }, 2000);
+    });
+  });
+
   function renderMarkdown(raw) {
     if (!raw) return '';
 
@@ -1297,8 +1487,12 @@ pre.json-block {
     const codeBlocks = [];
     let text = raw.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
       const idx = codeBlocks.length;
+      const escaped = escapeHtml(code.replace(/\n$/, ''));
+      const highlighted = highlightCode(escaped, lang);
       const langTag = lang ? '<span class="code-lang">' + escapeHtml(lang) + '</span>' : '';
-      codeBlocks.push('<pre>' + langTag + '<code>' + escapeHtml(code.replace(/\n$/, '')) + '</code></pre>');
+      const copyBtn = '<button class="btn-copy-code">COPY</button>';
+      const toolbar = '<span class="code-toolbar">' + langTag + copyBtn + '</span>';
+      codeBlocks.push('<pre>' + toolbar + '<code>' + highlighted + '</code></pre>');
       return '\x00CODEBLOCK' + idx + '\x00';
     });
 
