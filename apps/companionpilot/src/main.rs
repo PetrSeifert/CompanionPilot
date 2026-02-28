@@ -8,7 +8,10 @@ use companionpilot_core::{
     model::{MockModelProvider, ModelProvider, OpenRouterProvider},
     orchestrator::DefaultChatOrchestrator,
     safety::SafetyPolicy,
-    tools::{CurrentDateTimeTool, TavilyWebSearchTool, ToolExecutor, ToolRegistry},
+    tools::{
+        CurrentDateTimeTool, SpotifyPlayingStatusTool, TavilyWebSearchTool, ToolExecutor,
+        ToolRegistry,
+    },
 };
 use tokio::net::TcpListener;
 use tracing::{info, warn};
@@ -147,6 +150,7 @@ fn build_tools(config: &AppConfig) -> Arc<dyn ToolExecutor> {
 
     Arc::new(ToolRegistry {
         current_datetime: CurrentDateTimeTool,
+        spotify_playing_status: SpotifyPlayingStatusTool::default(),
         web_search,
     })
 }

@@ -889,6 +889,12 @@ fn build_tool_inventory_for_planner() -> &'static str {
     "when_not_to_use": "Question is timeless or explicitly historical."
   },
   {
+    "tool_name": "spotify_playing_status",
+    "args_schema": {},
+    "when_to_use": "Need the user's currently playing Spotify track/status.",
+    "when_not_to_use": "Question is unrelated to Spotify playback."
+  },
+  {
     "tool_name": "web_search",
     "args_schema": {
       "query": "string (required, non-empty)",
@@ -919,6 +925,12 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
             "current_datetime" => {
                 sanitized_calls.push(ToolCall {
                     tool_name: "current_datetime".to_owned(),
+                    args: json!({}),
+                });
+            }
+            "spotify_playing_status" => {
+                sanitized_calls.push(ToolCall {
+                    tool_name: "spotify_playing_status".to_owned(),
                     args: json!({}),
                 });
             }
@@ -1625,6 +1637,19 @@ mod tests {
             .as_str()
             .expect("query should be a string");
         assert_eq!(query, "current weather in berlin");
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_allows_spotify_playing_status() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "spotify_playing_status".to_owned(),
+            args: json!({"ignored": true}),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].tool_name, "spotify_playing_status");
+        assert_eq!(sanitized[0].args, json!({}));
     }
 
     #[test]

@@ -15,6 +15,7 @@ Workspace layout:
 - Memory abstraction (`PostgresMemoryStore`, `InMemoryMemoryStore`)
 - Tool runtime with Tavily web search support
 - Built-in `current_datetime` tool for UTC date/time grounding
+- Built-in `spotify_playing_status` tool for current Spotify playback
 - HTTP API for health and chat (`axum`)
 - Reply timing telemetry (planner/tools/model/memory stage durations)
 - Local dev infra (`docker-compose` with Postgres + Redis)
@@ -69,6 +70,7 @@ curl -X POST http://localhost:8080/chat \
 - Mention the bot or DM it.
 - CompanionPilot decides tool usage automatically from a unified planner decision.
 - For time-sensitive requests, planner can call `current_datetime` before `web_search`.
+- For Spotify playback requests, planner can call `spotify_playing_status`.
 - Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 - Short-term memory is injected from recent channel turns, even when no long-term fact is stored.
