@@ -17,6 +17,7 @@ use crate::{
 };
 
 const MAX_PLANNED_TOOL_CALLS: usize = 6;
+const MAX_TOOL_DECISION_ROUNDS: usize = 3;
 const SLOW_REPLY_THRESHOLD_MS: u64 = 30_000;
 
 pub struct DefaultChatOrchestrator {
@@ -49,6 +50,23 @@ enum MemoryDecision {
     },
 }
 
+enum ToolFollowupDecision {
+    Final {
+        answer: String,
+        rationale: String,
+        payload: Value,
+    },
+    UseTools {
+        tool_calls: Vec<ToolCall>,
+        rationale: String,
+        payload: Value,
+    },
+    Fallback {
+        reason: &'static str,
+        error: Option<String>,
+    },
+}
+
 #[derive(Debug, Deserialize)]
 struct UnifiedPlan {
     #[serde(default)]
@@ -76,6 +94,18 @@ struct PlannedMemory {
     value: String,
     #[serde(default)]
     confidence: f32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ToolFollowupPlan {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    final_answer: String,
+    #[serde(default)]
+    tool_calls: Vec<PlannedToolCall>,
+    #[serde(default)]
+    rationale: String,
 }
 
 struct ExecutedToolOutput {
@@ -141,11 +171,11 @@ impl DefaultChatOrchestrator {
         let planner_decision = self
             .decide_unified_plan(&ctx.content, &memory_context)
             .await;
-        let planner_ms = elapsed_ms(planner_started_at);
+        let mut planner_ms = elapsed_ms(planner_started_at);
         self.record_unified_planner_decision(&ctx, &planner_decision)
             .await;
 
-        let (planned_tool_calls, memory_decision) = match planner_decision {
+        let (mut pending_tool_calls, memory_decision) = match planner_decision {
             UnifiedPlanDecision::UsePlan {
                 tool_calls, memory, ..
             } => (tool_calls, memory),
@@ -168,143 +198,112 @@ impl DefaultChatOrchestrator {
         let mut tool_outputs = Vec::new();
         let mut citations = Vec::new();
         let mut tool_timings = Vec::new();
+        let mut followup_reply_text: Option<String> = None;
+        let mut tool_round = 0usize;
 
-        let tool_execution_started_at = Instant::now();
-        for tool_call in planned_tool_calls {
-            let tool_started_at = Instant::now();
-            let tool_name = tool_call.tool_name;
-            let args = tool_call.args.clone();
-            executed_tool_calls.push(ToolCall {
-                tool_name: tool_name.clone(),
-                args: args.clone(),
-            });
-            info!(
-                user_id = %ctx.user_id,
-                guild_id = %ctx.guild_id,
-                channel_id = %ctx.channel_id,
-                tool_name = %tool_name,
-                args_json = %args,
-                "tool call selected by unified planner"
-            );
+        loop {
+            if pending_tool_calls.is_empty() {
+                break;
+            }
 
-            let tool_result = match self.tools.execute(&tool_name, args.clone()).await {
-                Ok(result) => result,
-                Err(error) => {
-                    let error_text = error.to_string();
-                    self.record_tool_call(ToolCallRecord {
-                        user_id: ctx.user_id.clone(),
-                        guild_id: ctx.guild_id.clone(),
-                        channel_id: ctx.channel_id.clone(),
-                        tool_name: tool_name.clone(),
-                        source: "unified_planner".to_owned(),
-                        args_json: args.to_string(),
-                        result_text: String::new(),
-                        citations: Vec::new(),
-                        success: false,
-                        error: Some(error_text.clone()),
-                        timestamp: Utc::now(),
-                    })
-                    .await;
-                    let duration_ms = elapsed_ms(tool_started_at);
-                    tool_timings.push(ToolCallTiming {
-                        tool_name: tool_name.clone(),
-                        duration_ms,
-                        success: false,
-                    });
-                    warn!(
-                        user_id = %ctx.user_id,
-                        guild_id = %ctx.guild_id,
-                        channel_id = %ctx.channel_id,
-                        tool_name = %tool_name,
-                        duration_ms,
-                        ?error,
-                        "tool call failed; continuing final answer synthesis"
-                    );
-                    tool_outputs.push(ExecutedToolOutput {
-                        tool_name,
-                        args,
-                        success: false,
-                        text: error_text,
-                    });
-                    continue;
-                }
+            tool_round += 1;
+            let planner_source = if tool_round == 1 {
+                "unified_planner"
+            } else {
+                "tool_followup"
             };
-
-            self.record_tool_call(ToolCallRecord {
-                user_id: ctx.user_id.clone(),
-                guild_id: ctx.guild_id.clone(),
-                channel_id: ctx.channel_id.clone(),
-                tool_name: tool_name.clone(),
-                source: "unified_planner".to_owned(),
-                args_json: args.to_string(),
-                result_text: truncate_for_log(&tool_result.text, 1200),
-                citations: tool_result.citations.clone(),
-                success: true,
-                error: None,
-                timestamp: Utc::now(),
-            })
+            self.execute_planned_tool_calls(
+                &ctx,
+                pending_tool_calls,
+                planner_source,
+                &mut executed_tool_calls,
+                &mut tool_outputs,
+                &mut citations,
+                &mut tool_timings,
+            )
             .await;
 
-            let duration_ms = elapsed_ms(tool_started_at);
-            tool_timings.push(ToolCallTiming {
-                tool_name: tool_name.clone(),
-                duration_ms,
-                success: true,
-            });
-            info!(
-                user_id = %ctx.user_id,
-                tool_name = %tool_name,
-                duration_ms,
-                result_citations = tool_result.citations.len(),
-                "tool call completed"
-            );
+            if tool_round >= MAX_TOOL_DECISION_ROUNDS {
+                debug!(
+                    user_id = %ctx.user_id,
+                    tool_round,
+                    "tool planning rounds limit reached; forcing final synthesis"
+                );
+                break;
+            }
 
-            citations.extend(tool_result.citations);
-            tool_outputs.push(ExecutedToolOutput {
-                tool_name,
-                args,
-                success: true,
-                text: tool_result.text,
-            });
+            let followup_started_at = Instant::now();
+            let followup_decision = self
+                .decide_tool_followup(&ctx.content, &memory_context, &tool_outputs)
+                .await;
+            planner_ms = planner_ms.saturating_add(elapsed_ms(followup_started_at));
+            self.record_tool_followup_decision(&ctx, tool_round, &followup_decision)
+                .await;
+
+            match followup_decision {
+                ToolFollowupDecision::Final { answer, .. } => {
+                    followup_reply_text = Some(answer);
+                    break;
+                }
+                ToolFollowupDecision::UseTools { tool_calls, .. } => {
+                    pending_tool_calls = tool_calls;
+                }
+                ToolFollowupDecision::Fallback { reason, .. } => {
+                    debug!(
+                        user_id = %ctx.user_id,
+                        reason,
+                        tool_round,
+                        "tool follow-up planner fallback; forcing final synthesis"
+                    );
+                    break;
+                }
+            }
         }
-        let tool_execution_ms = elapsed_ms(tool_execution_started_at);
 
-        let final_model_started_at = Instant::now();
-        let reply_text = if tool_outputs.is_empty() {
-            self.model
-                .complete(ModelRequest {
-                    system_prompt: build_system_prompt(
-                        &memory_context,
-                        system_prompt_override.as_deref(),
-                    ),
-                    user_prompt: ctx.content.clone(),
-                })
-                .await?
+        let tool_execution_ms = tool_timings.iter().fold(0u64, |total, timing| {
+            total.saturating_add(timing.duration_ms)
+        });
+
+        let (reply_text, final_model_ms) = if let Some(answer) = followup_reply_text {
+            (answer, 0)
         } else {
-            let tool_output_block = format_tool_outputs(&tool_outputs);
-            let custom_prompt_header = system_prompt_override
-                .as_deref()
-                .map(|prompt| format!("Custom system prompt override:\n{prompt}\n\n"))
-                .unwrap_or_default();
-            self.model
-                .complete(ModelRequest {
-                    system_prompt: format!(
-                        "{}You are CompanionPilot. Use the provided tool outputs to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
-                        custom_prompt_header,
-                        build_recent_context_block(&memory_context.recent_messages)
-                    ),
-                    user_prompt: format!(
-                        "User request:\n{}\n\nTool outputs:\n{}",
-                        ctx.content, tool_output_block
-                    ),
-                })
-                .await
-                .unwrap_or_else(|error| {
-                    warn!(?error, "failed to synthesize final answer from tool outputs");
-                    fallback_tool_output_text(&tool_outputs)
-                })
+            let final_model_started_at = Instant::now();
+            let reply_text = if tool_outputs.is_empty() {
+                self.model
+                    .complete(ModelRequest {
+                        system_prompt: build_system_prompt(
+                            &memory_context,
+                            system_prompt_override.as_deref(),
+                        ),
+                        user_prompt: ctx.content.clone(),
+                    })
+                    .await?
+            } else {
+                let tool_output_block = format_tool_outputs(&tool_outputs);
+                let custom_prompt_header = system_prompt_override
+                    .as_deref()
+                    .map(|prompt| format!("Custom system prompt override:\n{prompt}\n\n"))
+                    .unwrap_or_default();
+                self.model
+                    .complete(ModelRequest {
+                        system_prompt: format!(
+                            "{}You are CompanionPilot. Use the provided tool outputs to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
+                            custom_prompt_header,
+                            build_recent_context_block(&memory_context.recent_messages)
+                        ),
+                        user_prompt: format!(
+                            "User request:\n{}\n\nTool outputs:\n{}",
+                            ctx.content, tool_output_block
+                        ),
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        warn!(?error, "failed to synthesize final answer from tool outputs");
+                        fallback_tool_output_text(&tool_outputs)
+                    })
+            };
+            (reply_text, elapsed_ms(final_model_started_at))
         };
-        let final_model_ms = elapsed_ms(final_model_started_at);
 
         let memory_write_started_at = Instant::now();
         match memory_decision {
@@ -455,6 +454,224 @@ impl DefaultChatOrchestrator {
         }
     }
 
+    async fn decide_tool_followup(
+        &self,
+        user_input: &str,
+        memory: &crate::types::MemoryContext,
+        tool_outputs: &[ExecutedToolOutput],
+    ) -> ToolFollowupDecision {
+        let planner_prompt = build_tool_followup_prompt(memory);
+        let planner_result = self
+            .model
+            .complete(ModelRequest {
+                system_prompt: planner_prompt,
+                user_prompt: format!(
+                    "User request:\n{}\n\nTool outputs so far:\n{}",
+                    user_input,
+                    format_tool_outputs(tool_outputs)
+                ),
+            })
+            .await;
+
+        let planner_result = match planner_result {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(?error, "tool follow-up planner model call failed");
+                return ToolFollowupDecision::Fallback {
+                    reason: "followup_model_error",
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+
+        match parse_tool_followup_plan(&planner_result) {
+            Ok(plan) => {
+                let rationale = if plan.rationale.trim().is_empty() {
+                    "tool_followup_planner".to_owned()
+                } else {
+                    plan.rationale.trim().to_owned()
+                };
+                let action = plan.action.trim().to_ascii_lowercase();
+
+                match action.as_str() {
+                    "final" | "final_answer" => {
+                        let answer = plan.final_answer.trim().to_owned();
+                        if answer.is_empty() {
+                            return ToolFollowupDecision::Fallback {
+                                reason: "followup_empty_final",
+                                error: Some(
+                                    "follow-up planner returned empty final answer".to_owned(),
+                                ),
+                            };
+                        }
+
+                        ToolFollowupDecision::Final {
+                            answer: answer.clone(),
+                            rationale: rationale.clone(),
+                            payload: json!({
+                                "action": "final",
+                                "final_answer": answer,
+                                "rationale": rationale
+                            }),
+                        }
+                    }
+                    "tools" | "tool_calls" => {
+                        let tool_calls = sanitize_planned_tool_calls(plan.tool_calls);
+                        if tool_calls.is_empty() {
+                            return ToolFollowupDecision::Fallback {
+                                reason: "followup_empty_tools",
+                                error: Some(
+                                    "follow-up planner requested tools but produced none"
+                                        .to_owned(),
+                                ),
+                            };
+                        }
+
+                        ToolFollowupDecision::UseTools {
+                            payload: json!({
+                                "action": "tools",
+                                "tool_calls": &tool_calls,
+                                "rationale": rationale.clone()
+                            }),
+                            rationale,
+                            tool_calls,
+                        }
+                    }
+                    _ => ToolFollowupDecision::Fallback {
+                        reason: "followup_invalid_action",
+                        error: Some(format!(
+                            "follow-up planner returned unsupported action `{}`",
+                            plan.action
+                        )),
+                    },
+                }
+            }
+            Err(error) => {
+                warn!(
+                    ?error,
+                    planner_output = %truncate_for_log(&planner_result, 220),
+                    "failed to parse tool follow-up planner output"
+                );
+                ToolFollowupDecision::Fallback {
+                    reason: "followup_parse_error",
+                    error: Some(error.to_string()),
+                }
+            }
+        }
+    }
+
+    async fn execute_planned_tool_calls(
+        &self,
+        ctx: &MessageCtx,
+        planned_tool_calls: Vec<ToolCall>,
+        source: &'static str,
+        executed_tool_calls: &mut Vec<ToolCall>,
+        tool_outputs: &mut Vec<ExecutedToolOutput>,
+        citations: &mut Vec<String>,
+        tool_timings: &mut Vec<ToolCallTiming>,
+    ) {
+        for tool_call in planned_tool_calls {
+            let tool_started_at = Instant::now();
+            let tool_name = tool_call.tool_name;
+            let args = tool_call.args.clone();
+            executed_tool_calls.push(ToolCall {
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            });
+            info!(
+                user_id = %ctx.user_id,
+                guild_id = %ctx.guild_id,
+                channel_id = %ctx.channel_id,
+                planner_source = source,
+                tool_name = %tool_name,
+                args_json = %args,
+                "tool call selected by unified planner"
+            );
+
+            let tool_result = match self.tools.execute(&tool_name, args.clone()).await {
+                Ok(result) => result,
+                Err(error) => {
+                    let error_text = error.to_string();
+                    self.record_tool_call(ToolCallRecord {
+                        user_id: ctx.user_id.clone(),
+                        guild_id: ctx.guild_id.clone(),
+                        channel_id: ctx.channel_id.clone(),
+                        tool_name: tool_name.clone(),
+                        source: source.to_owned(),
+                        args_json: args.to_string(),
+                        result_text: String::new(),
+                        citations: Vec::new(),
+                        success: false,
+                        error: Some(error_text.clone()),
+                        timestamp: Utc::now(),
+                    })
+                    .await;
+                    let duration_ms = elapsed_ms(tool_started_at);
+                    tool_timings.push(ToolCallTiming {
+                        tool_name: tool_name.clone(),
+                        duration_ms,
+                        success: false,
+                    });
+                    warn!(
+                        user_id = %ctx.user_id,
+                        guild_id = %ctx.guild_id,
+                        channel_id = %ctx.channel_id,
+                        planner_source = source,
+                        tool_name = %tool_name,
+                        duration_ms,
+                        ?error,
+                        "tool call failed; continuing orchestration"
+                    );
+                    tool_outputs.push(ExecutedToolOutput {
+                        tool_name,
+                        args,
+                        success: false,
+                        text: error_text,
+                    });
+                    continue;
+                }
+            };
+
+            self.record_tool_call(ToolCallRecord {
+                user_id: ctx.user_id.clone(),
+                guild_id: ctx.guild_id.clone(),
+                channel_id: ctx.channel_id.clone(),
+                tool_name: tool_name.clone(),
+                source: source.to_owned(),
+                args_json: args.to_string(),
+                result_text: truncate_for_log(&tool_result.text, 1200),
+                citations: tool_result.citations.clone(),
+                success: true,
+                error: None,
+                timestamp: Utc::now(),
+            })
+            .await;
+
+            let duration_ms = elapsed_ms(tool_started_at);
+            tool_timings.push(ToolCallTiming {
+                tool_name: tool_name.clone(),
+                duration_ms,
+                success: true,
+            });
+            info!(
+                user_id = %ctx.user_id,
+                planner_source = source,
+                tool_name = %tool_name,
+                duration_ms,
+                result_citations = tool_result.citations.len(),
+                "tool call completed"
+            );
+
+            citations.extend(tool_result.citations);
+            tool_outputs.push(ExecutedToolOutput {
+                tool_name,
+                args,
+                success: true,
+                text: tool_result.text,
+            });
+        }
+    }
+
     async fn record_tool_call(&self, call: ToolCallRecord) {
         if let Err(error) = self.memory.record_tool_call(call).await {
             warn!(?error, "failed to persist tool call log");
@@ -479,12 +696,83 @@ impl DefaultChatOrchestrator {
             ),
         };
 
+        self.record_planner_decision(
+            ctx,
+            "unified",
+            decision_value,
+            rationale,
+            payload,
+            success,
+            error,
+        )
+        .await;
+    }
+
+    async fn record_tool_followup_decision(
+        &self,
+        ctx: &MessageCtx,
+        round: usize,
+        decision: &ToolFollowupDecision,
+    ) {
+        let (decision_value, rationale, payload, success, error) = match decision {
+            ToolFollowupDecision::Final {
+                rationale, payload, ..
+            } => (
+                "final_answer",
+                rationale.clone(),
+                payload.clone(),
+                true,
+                None,
+            ),
+            ToolFollowupDecision::UseTools {
+                rationale, payload, ..
+            } => (
+                "request_tools",
+                rationale.clone(),
+                payload.clone(),
+                true,
+                None,
+            ),
+            ToolFollowupDecision::Fallback { reason, error } => (
+                "fallback_no_tools",
+                (*reason).to_owned(),
+                json!({}),
+                false,
+                error.clone(),
+            ),
+        };
+
+        self.record_planner_decision(
+            ctx,
+            "tool_followup",
+            decision_value,
+            rationale,
+            json!({
+                "round": round,
+                "decision": payload
+            }),
+            success,
+            error,
+        )
+        .await;
+    }
+
+    async fn record_planner_decision(
+        &self,
+        ctx: &MessageCtx,
+        planner: &str,
+        decision: &str,
+        rationale: String,
+        payload: Value,
+        success: bool,
+        error: Option<String>,
+    ) {
         let record = PlannerDecisionRecord {
             user_id: ctx.user_id.clone(),
             guild_id: ctx.guild_id.clone(),
             channel_id: ctx.channel_id.clone(),
-            planner: "unified".to_owned(),
-            decision: decision_value.to_owned(),
+            planner: planner.to_owned(),
+            decision: decision.to_owned(),
             rationale,
             payload_json: payload.to_string(),
             success,
@@ -495,37 +783,14 @@ impl DefaultChatOrchestrator {
         if let Err(store_error) = self.memory.record_planner_decision(record).await {
             warn!(
                 ?store_error,
-                "failed to persist unified planner decision log"
+                planner, "failed to persist planner decision log"
             );
         }
     }
 }
 
 fn build_unified_planner_prompt(memory: &crate::types::MemoryContext) -> String {
-    let mut context_lines = Vec::new();
-    if let Some(summary) = &memory.summary {
-        context_lines.push(format!("Conversation summary: {summary}"));
-    }
-
-    if !memory.facts.is_empty() {
-        let facts = memory
-            .facts
-            .iter()
-            .map(|fact| format!("{}={}", fact.key, fact.value))
-            .collect::<Vec<_>>()
-            .join("; ");
-        context_lines.push(format!("Known user facts: {facts}"));
-    }
-
-    if !memory.recent_messages.is_empty() {
-        context_lines.push(build_recent_context_block(&memory.recent_messages));
-    }
-
-    let context_block = if context_lines.is_empty() {
-        String::new()
-    } else {
-        format!("Context:\n{}\n", context_lines.join("\n"))
-    };
+    let context_block = build_planner_context_block(memory);
 
     format!(
         "You are the unified planner for CompanionPilot.
@@ -556,6 +821,57 @@ Tool inventory:
     )
 }
 
+fn build_tool_followup_prompt(memory: &crate::types::MemoryContext) -> String {
+    let context_block = build_planner_context_block(memory);
+
+    format!(
+        "You are the tool follow-up planner for CompanionPilot.
+Decide whether the current evidence is enough for a final user-facing answer, or whether more tool calls are needed.
+Return strict JSON only (no markdown, no prose) with this exact schema:
+{{
+  \"action\": \"final\"|\"tools\",
+  \"final_answer\": \"non-empty only when action=final\",
+  \"tool_calls\": [{{\"tool_name\":\"...\",\"args\":{{...}}}}],
+  \"rationale\": \"short reason\"
+}}
+If action=final, provide the complete final answer and return an empty tool_calls array.
+If action=tools, final_answer must be empty and tool_calls must contain at least one valid call.
+Only request tools when the current outputs are insufficient or conflicting.
+Tool inventory:
+{}
+{}",
+        build_tool_inventory_for_planner(),
+        context_block
+    )
+}
+
+fn build_planner_context_block(memory: &crate::types::MemoryContext) -> String {
+    let mut context_lines = Vec::new();
+    if let Some(summary) = &memory.summary {
+        context_lines.push(format!("Conversation summary: {summary}"));
+    }
+
+    if !memory.facts.is_empty() {
+        let facts = memory
+            .facts
+            .iter()
+            .map(|fact| format!("{}={}", fact.key, fact.value))
+            .collect::<Vec<_>>()
+            .join("; ");
+        context_lines.push(format!("Known user facts: {facts}"));
+    }
+
+    if !memory.recent_messages.is_empty() {
+        context_lines.push(build_recent_context_block(&memory.recent_messages));
+    }
+
+    if context_lines.is_empty() {
+        String::new()
+    } else {
+        format!("Context:\n{}\n", context_lines.join("\n"))
+    }
+}
+
 fn build_tool_inventory_for_planner() -> &'static str {
     r#"[
   {
@@ -571,6 +887,10 @@ fn build_tool_inventory_for_planner() -> &'static str {
 }
 
 fn parse_unified_plan(raw: &str) -> Result<UnifiedPlan, serde_json::Error> {
+    parse_json_plan(raw)
+}
+
+fn parse_tool_followup_plan(raw: &str) -> Result<ToolFollowupPlan, serde_json::Error> {
     parse_json_plan(raw)
 }
 
@@ -880,14 +1200,15 @@ fn clean_memory_value(value: &str) -> String {
 mod tests {
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use chrono::Utc;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::{
         memory::{InMemoryMemoryStore, MemoryStore},
-        model::MockModelProvider,
+        model::{MockModelProvider, ModelProvider, ModelRequest},
         safety::SafetyPolicy,
-        tools::ToolRegistry,
+        tools::{ToolExecutor, ToolRegistry, ToolResult},
         types::MessageCtx,
     };
 
@@ -895,6 +1216,98 @@ mod tests {
         DefaultChatOrchestrator, PlannedToolCall, clean_memory_value, parse_unified_plan,
         sanitize_memory_key, sanitize_planned_tool_calls,
     };
+
+    #[derive(Debug, Default)]
+    struct FollowupLoopModelProvider;
+
+    #[async_trait]
+    impl ModelProvider for FollowupLoopModelProvider {
+        async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+            if request
+                .system_prompt
+                .contains("You are the unified planner for CompanionPilot.")
+            {
+                return Ok(json!({
+                    "tool_calls": [
+                        {
+                            "tool_name": "web_search",
+                            "args": {
+                                "query": "alpha",
+                                "max_results": 3
+                            }
+                        }
+                    ],
+                    "memory": {
+                        "store": false,
+                        "key": "",
+                        "value": "",
+                        "confidence": 0.0
+                    },
+                    "rationale": "need first lookup"
+                })
+                .to_string());
+            }
+
+            if request
+                .system_prompt
+                .contains("You are the tool follow-up planner for CompanionPilot.")
+            {
+                if request.user_prompt.contains("result:alpha")
+                    && !request.user_prompt.contains("result:beta")
+                {
+                    return Ok(json!({
+                        "action": "tools",
+                        "final_answer": "",
+                        "tool_calls": [
+                            {
+                                "tool_name": "web_search",
+                                "args": {
+                                    "query": "beta",
+                                    "max_results": 2
+                                }
+                            }
+                        ],
+                        "rationale": "need second lookup"
+                    })
+                    .to_string());
+                }
+
+                if request.user_prompt.contains("result:beta") {
+                    return Ok(json!({
+                        "action": "final",
+                        "final_answer": "Final answer from follow-up planner.",
+                        "tool_calls": [],
+                        "rationale": "have enough evidence"
+                    })
+                    .to_string());
+                }
+            }
+
+            Ok("fallback final synthesis".to_owned())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct StubWebSearchToolExecutor;
+
+    #[async_trait]
+    impl ToolExecutor for StubWebSearchToolExecutor {
+        async fn execute(&self, tool_name: &str, args: Value) -> anyhow::Result<ToolResult> {
+            if tool_name != "web_search" {
+                return Err(anyhow::anyhow!("unknown tool: {tool_name}"));
+            }
+
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing query arg"))?;
+
+            Ok(ToolResult {
+                text: format!("result:{query}"),
+                citations: vec![format!("https://example.com/{query}")],
+            })
+        }
+    }
 
     #[tokio::test]
     async fn persists_simple_name_fact() {
@@ -977,6 +1390,37 @@ mod tests {
         assert_eq!(result.tool_calls[0].tool_name, "web_search");
         assert!(result.text.contains("Status: error"));
         assert!(result.text.contains("web_search tool is not configured"));
+    }
+
+    #[tokio::test]
+    async fn followup_planner_can_run_multiple_tool_rounds_before_final_answer() {
+        let memory = Arc::new(InMemoryMemoryStore::default());
+        let orchestrator = DefaultChatOrchestrator::new(
+            Arc::new(FollowupLoopModelProvider),
+            memory,
+            Arc::new(StubWebSearchToolExecutor),
+            SafetyPolicy::default(),
+        );
+
+        let result = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "3b".into(),
+                user_id: "u3b".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "find a final answer using tools".into(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("follow-up planning loop should complete");
+
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].tool_name, "web_search");
+        assert_eq!(result.tool_calls[0].args["query"], "alpha");
+        assert_eq!(result.tool_calls[1].tool_name, "web_search");
+        assert_eq!(result.tool_calls[1].args["query"], "beta");
+        assert_eq!(result.text, "Final answer from follow-up planner.");
+        assert_eq!(result.citations.len(), 2);
     }
 
     #[tokio::test]
