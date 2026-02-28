@@ -11,43 +11,46 @@ impl ModelProvider for MockModelProvider {
     async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
         if request
             .system_prompt
-            .contains("You are a tool router for CompanionPilot.")
+            .contains("You are the unified planner for CompanionPilot.")
         {
-            return Ok(json!({
-                "use_search": false,
-                "query": ""
-            })
-            .to_string());
-        }
-
-        if request
-            .system_prompt
-            .contains("You are a memory router for CompanionPilot.")
-        {
-            if let Some(name) = extract_name(&request.user_prompt) {
-                return Ok(json!({
+            let memory = if let Some(name) = extract_name(&request.user_prompt) {
+                json!({
                     "store": true,
                     "key": "name",
                     "value": name,
                     "confidence": 0.96
                 })
-                .to_string());
-            }
-            if let Some(game) = extract_game(&request.user_prompt) {
-                return Ok(json!({
+            } else if let Some(game) = extract_game(&request.user_prompt) {
+                json!({
                     "store": true,
                     "key": "favorite_game",
                     "value": game,
                     "confidence": 0.84
                 })
-                .to_string());
+            } else {
+                json!({
+                    "store": false,
+                    "key": "",
+                    "value": "",
+                    "confidence": 0.0
+                })
+            };
+
+            let mut tool_calls = Vec::new();
+            if let Some(query) = extract_search_query(&request.user_prompt) {
+                tool_calls.push(json!({
+                    "tool_name": "web_search",
+                    "args": {
+                        "query": query,
+                        "max_results": 5
+                    }
+                }));
             }
 
             return Ok(json!({
-                "store": false,
-                "key": "",
-                "value": "",
-                "confidence": 0.0
+                "tool_calls": tool_calls,
+                "memory": memory,
+                "rationale": "mock_unified_planner"
             })
             .to_string());
         }
@@ -80,4 +83,25 @@ fn extract_game(input: &str) -> Option<String> {
     lowered
         .find("i play ")
         .map(|index| input[index + "i play ".len()..].trim().to_owned())
+}
+
+fn extract_search_query(input: &str) -> Option<String> {
+    let lowered = input.to_lowercase();
+
+    let query = if let Some(index) = lowered.find("search the web for ") {
+        input[index + "search the web for ".len()..].trim()
+    } else if let Some(index) = lowered.find("look up ") {
+        input[index + "look up ".len()..].trim()
+    } else {
+        return None;
+    };
+
+    let query = query
+        .trim_matches(|character: char| !character.is_alphanumeric() && !character.is_whitespace())
+        .trim();
+    if query.is_empty() {
+        None
+    } else {
+        Some(query.to_owned())
+    }
 }

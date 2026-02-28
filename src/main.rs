@@ -142,7 +142,7 @@ fn build_tools(config: &AppConfig) -> Arc<dyn ToolExecutor> {
         .map(|key| TavilyWebSearchTool::new(key.clone()));
 
     if web_search.is_none() {
-        warn!("TAVILY_API_KEY not set; /search command will fail");
+        warn!("TAVILY_API_KEY not set; planner-selected web_search calls will fail");
     }
 
     Arc::new(ToolRegistry { web_search })

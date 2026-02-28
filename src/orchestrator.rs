@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -16,6 +16,8 @@ use crate::{
     },
 };
 
+const MAX_PLANNED_TOOL_CALLS: usize = 6;
+
 pub struct DefaultChatOrchestrator {
     model: Arc<dyn ModelProvider>,
     memory: Arc<dyn MemoryStore>,
@@ -23,9 +25,17 @@ pub struct DefaultChatOrchestrator {
     safety: SafetyPolicy,
 }
 
-enum SearchDecision {
-    Use { query: String, source: &'static str },
-    Skip { reason: &'static str },
+enum UnifiedPlanDecision {
+    UsePlan {
+        tool_calls: Vec<ToolCall>,
+        memory: MemoryDecision,
+        rationale: String,
+        payload: Value,
+    },
+    Fallback {
+        reason: &'static str,
+        error: Option<String>,
+    },
 }
 
 enum MemoryDecision {
@@ -35,8 +45,42 @@ enum MemoryDecision {
     },
     Skip {
         reason: &'static str,
-        error: Option<String>,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct UnifiedPlan {
+    #[serde(default)]
+    tool_calls: Vec<PlannedToolCall>,
+    #[serde(default)]
+    memory: PlannedMemory,
+    #[serde(default)]
+    rationale: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlannedToolCall {
+    tool_name: String,
+    #[serde(default)]
+    args: Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PlannedMemory {
+    #[serde(default)]
+    store: bool,
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    confidence: f32,
+}
+
+struct ExecutedToolOutput {
+    tool_name: String,
+    args: Value,
+    text: String,
 }
 
 impl DefaultChatOrchestrator {
@@ -72,40 +116,55 @@ impl DefaultChatOrchestrator {
             })
             .await?;
 
-        let search_decision = if let Some(manual) = parse_search_command(&ctx.content) {
-            SearchDecision::Use {
-                query: manual.to_owned(),
-                source: "manual_prefix",
-            }
-        } else {
-            self.decide_search_query(&ctx.content, &memory_context)
-                .await
-        };
-        self.record_search_planner_decision(&ctx, &search_decision)
+        let planner_decision = self
+            .decide_unified_plan(&ctx.content, &memory_context)
+            .await;
+        self.record_unified_planner_decision(&ctx, &planner_decision)
             .await;
 
-        if let SearchDecision::Use { query, source } = search_decision {
+        let (planned_tool_calls, memory_decision) = match planner_decision {
+            UnifiedPlanDecision::UsePlan {
+                tool_calls, memory, ..
+            } => (tool_calls, memory),
+            UnifiedPlanDecision::Fallback { reason, .. } => {
+                debug!(
+                    user_id = %ctx.user_id,
+                    reason,
+                    "planner fallback: running without tools and without memory write"
+                );
+                (
+                    Vec::new(),
+                    MemoryDecision::Skip {
+                        reason: "planner_fallback",
+                    },
+                )
+            }
+        };
+
+        let mut executed_tool_calls = Vec::new();
+        let mut tool_outputs = Vec::new();
+        let mut citations = Vec::new();
+
+        for tool_call in planned_tool_calls {
+            let args = tool_call.args.clone();
             info!(
                 user_id = %ctx.user_id,
                 guild_id = %ctx.guild_id,
                 channel_id = %ctx.channel_id,
-                source,
-                query = %query,
-                "web search selected"
+                tool_name = %tool_call.tool_name,
+                args_json = %args,
+                "tool call selected by unified planner"
             );
-            let args = json!({
-                "query": query,
-                "max_results": 5
-            });
-            let tool_result = match self.tools.execute("web_search", args.clone()).await {
+
+            let tool_result = match self.tools.execute(&tool_call.tool_name, args.clone()).await {
                 Ok(result) => result,
                 Err(error) => {
                     self.record_tool_call(ToolCallRecord {
                         user_id: ctx.user_id.clone(),
                         guild_id: ctx.guild_id.clone(),
                         channel_id: ctx.channel_id.clone(),
-                        tool_name: "web_search".to_owned(),
-                        source: source.to_owned(),
+                        tool_name: tool_call.tool_name.clone(),
+                        source: "unified_planner".to_owned(),
                         args_json: args.to_string(),
                         result_text: String::new(),
                         citations: Vec::new(),
@@ -118,18 +177,20 @@ impl DefaultChatOrchestrator {
                         user_id = %ctx.user_id,
                         guild_id = %ctx.guild_id,
                         channel_id = %ctx.channel_id,
+                        tool_name = %tool_call.tool_name,
                         ?error,
-                        "web search tool failed"
+                        "tool call failed"
                     );
                     return Err(error);
                 }
             };
+
             self.record_tool_call(ToolCallRecord {
                 user_id: ctx.user_id.clone(),
                 guild_id: ctx.guild_id.clone(),
                 channel_id: ctx.channel_id.clone(),
-                tool_name: "web_search".to_owned(),
-                source: source.to_owned(),
+                tool_name: tool_call.tool_name.clone(),
+                source: "unified_planner".to_owned(),
                 args_json: args.to_string(),
                 result_text: truncate_for_log(&tool_result.text, 1200),
                 citations: tool_result.citations.clone(),
@@ -138,111 +199,77 @@ impl DefaultChatOrchestrator {
                 timestamp: Utc::now(),
             })
             .await;
+
             info!(
                 user_id = %ctx.user_id,
+                tool_name = %tool_call.tool_name,
                 result_citations = tool_result.citations.len(),
-                "web search tool completed"
+                "tool call completed"
             );
-            let final_text = self
-                .model
+
+            citations.extend(tool_result.citations);
+            executed_tool_calls.push(ToolCall {
+                tool_name: tool_call.tool_name.clone(),
+                args: args.clone(),
+            });
+            tool_outputs.push(ExecutedToolOutput {
+                tool_name: tool_call.tool_name,
+                args,
+                text: tool_result.text,
+            });
+        }
+
+        let reply_text = if tool_outputs.is_empty() {
+            self.model
+                .complete(ModelRequest {
+                    system_prompt: build_system_prompt(&memory_context),
+                    user_prompt: ctx.content.clone(),
+                })
+                .await?
+        } else {
+            let tool_output_block = format_tool_outputs(&tool_outputs);
+            self.model
                 .complete(ModelRequest {
                     system_prompt: format!(
-                        "You are CompanionPilot. Use the provided search output to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
+                        "You are CompanionPilot. Use the provided tool outputs to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
                         build_recent_context_block(&memory_context.recent_messages)
                     ),
                     user_prompt: format!(
-                        "User request:\n{}\n\nSearch output:\n{}",
-                        ctx.content, tool_result.text
+                        "User request:\n{}\n\nTool outputs:\n{}",
+                        ctx.content, tool_output_block
                     ),
                 })
                 .await
-                .unwrap_or(tool_result.text.clone());
-            let reply = OrchestratorReply {
-                text: final_text,
-                citations: tool_result.citations,
-                tool_calls: vec![ToolCall {
-                    tool_name: "web_search".to_owned(),
-                    args,
-                }],
-                safety_flags,
-            };
-            self.memory
-                .record_chat_message(ChatMessageRecord {
-                    id: format!("{}-assistant", ctx.message_id),
-                    user_id: ctx.user_id,
-                    guild_id: ctx.guild_id,
-                    channel_id: ctx.channel_id,
-                    role: ChatRole::Assistant,
-                    content: reply.text.clone(),
-                    timestamp: Utc::now(),
+                .unwrap_or_else(|error| {
+                    warn!(?error, "failed to synthesize final answer from tool outputs");
+                    fallback_tool_output_text(&tool_outputs)
                 })
-                .await?;
-            return Ok(reply);
-        }
-        if let SearchDecision::Skip { reason } = search_decision {
-            debug!(
-                user_id = %ctx.user_id,
-                guild_id = %ctx.guild_id,
-                channel_id = %ctx.channel_id,
-                reason,
-                "web search skipped"
-            );
-        }
+        };
 
-        let system_prompt = build_system_prompt(&memory_context);
-        let model_response = self
-            .model
-            .complete(ModelRequest {
-                system_prompt,
-                user_prompt: ctx.content.clone(),
-            })
-            .await?;
-
-        match self.decide_memory_fact(&ctx.content, &memory_context).await {
+        match memory_decision {
             MemoryDecision::Store { fact, rationale } => {
                 info!(
                     user_id = %ctx.user_id,
                     memory_key = %fact.key,
                     confidence = fact.confidence,
+                    rationale,
                     "memory fact stored"
                 );
-                self.record_memory_planner_decision(
-                    &ctx,
-                    "store",
-                    rationale,
-                    &json!({
-                        "key": fact.key,
-                        "value": fact.value,
-                        "confidence": fact.confidence
-                    }),
-                    true,
-                    None,
-                )
-                .await;
                 self.memory.upsert_fact(&ctx.user_id, fact).await?;
             }
-            MemoryDecision::Skip { reason, error } => {
+            MemoryDecision::Skip { reason } => {
                 debug!(
                     user_id = %ctx.user_id,
                     reason,
                     "memory write skipped"
                 );
-                self.record_memory_planner_decision(
-                    &ctx,
-                    "skip",
-                    reason,
-                    &json!({}),
-                    error.is_none(),
-                    error,
-                )
-                .await;
             }
         }
 
         let reply = OrchestratorReply {
-            text: model_response,
-            citations: Vec::new(),
-            tool_calls: Vec::new(),
+            text: reply_text,
+            citations: dedupe_citations(citations),
+            tool_calls: executed_tool_calls,
             safety_flags,
         };
 
@@ -261,12 +288,12 @@ impl DefaultChatOrchestrator {
         Ok(reply)
     }
 
-    async fn decide_search_query(
+    async fn decide_unified_plan(
         &self,
         user_input: &str,
         memory: &crate::types::MemoryContext,
-    ) -> SearchDecision {
-        let planner_prompt = build_search_planner_prompt(memory);
+    ) -> UnifiedPlanDecision {
+        let planner_prompt = build_unified_planner_prompt(memory);
         let planner_result = self
             .model
             .complete(ModelRequest {
@@ -278,116 +305,44 @@ impl DefaultChatOrchestrator {
         let planner_result = match planner_result {
             Ok(content) => content,
             Err(error) => {
-                warn!(?error, "search planner model call failed");
-                return SearchDecision::Skip {
-                    reason: "planner_model_error",
-                };
-            }
-        };
-
-        match parse_planner_output(&planner_result) {
-            Ok(plan) => {
-                if !plan.use_search {
-                    return SearchDecision::Skip {
-                        reason: "planner_no_search",
-                    };
-                }
-                let query = plan.query.trim();
-                if query.is_empty() {
-                    return SearchDecision::Skip {
-                        reason: "planner_empty_query",
-                    };
-                }
-
-                let normalized_query = normalize_for_compare(query);
-                let normalized_input = normalize_for_compare(user_input);
-                let query_word_count = query.split_whitespace().count();
-                if normalized_query == normalized_input && query_word_count > 7 {
-                    return SearchDecision::Use {
-                        query: fallback_search_query_with_context(user_input, memory),
-                        source: "planner_refined",
-                    };
-                }
-
-                SearchDecision::Use {
-                    query: query.to_owned(),
-                    source: "model_planner",
-                }
-            }
-            Err(error) => {
-                warn!(
-                    ?error,
-                    planner_output = %truncate_for_log(&planner_result, 220),
-                    "failed to parse search planner output"
-                );
-                SearchDecision::Skip {
-                    reason: "planner_parse_error",
-                }
-            }
-        }
-    }
-
-    async fn decide_memory_fact(
-        &self,
-        user_input: &str,
-        memory: &crate::types::MemoryContext,
-    ) -> MemoryDecision {
-        let planner_prompt = build_memory_planner_prompt(memory);
-        let planner_result = self
-            .model
-            .complete(ModelRequest {
-                system_prompt: planner_prompt,
-                user_prompt: user_input.to_owned(),
-            })
-            .await;
-
-        let planner_result = match planner_result {
-            Ok(content) => content,
-            Err(error) => {
-                warn!(?error, "memory planner model call failed");
-                return MemoryDecision::Skip {
+                warn!(?error, "unified planner model call failed");
+                return UnifiedPlanDecision::Fallback {
                     reason: "planner_model_error",
                     error: Some(error.to_string()),
                 };
             }
         };
 
-        match parse_memory_plan(&planner_result) {
+        match parse_unified_plan(&planner_result) {
             Ok(plan) => {
-                if !plan.store {
-                    return MemoryDecision::Skip {
-                        reason: "planner_no_store",
-                        error: None,
-                    };
-                }
+                let tool_calls = sanitize_planned_tool_calls(plan.tool_calls);
+                let memory = memory_decision_from_plan(plan.memory);
+                let rationale = if plan.rationale.trim().is_empty() {
+                    "model_planner".to_owned()
+                } else {
+                    plan.rationale.trim().to_owned()
+                };
 
-                let key = sanitize_memory_key(&plan.key);
-                let value = clean_memory_value(&plan.value);
-                if key.is_empty() || value.is_empty() {
-                    return MemoryDecision::Skip {
-                        reason: "planner_invalid_fact",
-                        error: None,
-                    };
-                }
+                let payload = json!({
+                    "tool_calls": tool_calls,
+                    "memory": memory_payload(&memory),
+                    "rationale": rationale
+                });
 
-                MemoryDecision::Store {
-                    fact: MemoryFact {
-                        key,
-                        value,
-                        confidence: plan.confidence.clamp(0.0, 1.0),
-                        source: "user_message".to_owned(),
-                        updated_at: Utc::now(),
-                    },
-                    rationale: "model_planner",
+                UnifiedPlanDecision::UsePlan {
+                    tool_calls,
+                    memory,
+                    rationale,
+                    payload,
                 }
             }
             Err(error) => {
                 warn!(
                     ?error,
                     planner_output = %truncate_for_log(&planner_result, 220),
-                    "failed to parse memory planner output"
+                    "failed to parse unified planner output"
                 );
-                MemoryDecision::Skip {
+                UnifiedPlanDecision::Fallback {
                     reason: "planner_parse_error",
                     error: Some(error.to_string()),
                 }
@@ -401,64 +356,31 @@ impl DefaultChatOrchestrator {
         }
     }
 
-    async fn record_search_planner_decision(&self, ctx: &MessageCtx, decision: &SearchDecision) {
-        let (decision_value, rationale, payload, success, error) = match decision {
-            SearchDecision::Use { query, source } => (
-                "use_search",
-                *source,
-                json!({
-                    "query": query
-                }),
-                true,
-                None,
-            ),
-            SearchDecision::Skip { reason } => (
-                "skip_search",
-                *reason,
-                json!({}),
-                !matches!(*reason, "planner_model_error" | "planner_parse_error"),
-                if matches!(*reason, "planner_model_error" | "planner_parse_error") {
-                    Some((*reason).to_owned())
-                } else {
-                    None
-                },
-            ),
-        };
-
-        let record = PlannerDecisionRecord {
-            user_id: ctx.user_id.clone(),
-            guild_id: ctx.guild_id.clone(),
-            channel_id: ctx.channel_id.clone(),
-            planner: "search".to_owned(),
-            decision: decision_value.to_owned(),
-            rationale: rationale.to_owned(),
-            payload_json: payload.to_string(),
-            success,
-            error,
-            timestamp: Utc::now(),
-        };
-
-        if let Err(error) = self.memory.record_planner_decision(record).await {
-            warn!(?error, "failed to persist search planner decision log");
-        }
-    }
-
-    async fn record_memory_planner_decision(
+    async fn record_unified_planner_decision(
         &self,
         ctx: &MessageCtx,
-        decision: &str,
-        rationale: &str,
-        payload: &serde_json::Value,
-        success: bool,
-        error: Option<String>,
+        decision: &UnifiedPlanDecision,
     ) {
+        let (decision_value, rationale, payload, success, error) = match decision {
+            UnifiedPlanDecision::UsePlan {
+                rationale, payload, ..
+            } => ("apply_plan", rationale.clone(), payload.clone(), true, None),
+            UnifiedPlanDecision::Fallback { reason, error } => (
+                "fallback_no_tools",
+                (*reason).to_owned(),
+                json!({}),
+                false,
+                error.clone(),
+            ),
+        };
+
         let record = PlannerDecisionRecord {
             user_id: ctx.user_id.clone(),
             guild_id: ctx.guild_id.clone(),
             channel_id: ctx.channel_id.clone(),
-            planner: "memory".to_owned(),
-            decision: decision.to_owned(),
-            rationale: rationale.to_owned(),
+            planner: "unified".to_owned(),
+            decision: decision_value.to_owned(),
+            rationale,
             payload_json: payload.to_string(),
             success,
             error,
@@ -468,22 +390,18 @@ impl DefaultChatOrchestrator {
         if let Err(store_error) = self.memory.record_planner_decision(record).await {
             warn!(
                 ?store_error,
-                "failed to persist memory planner decision log"
+                "failed to persist unified planner decision log"
             );
         }
     }
 }
 
-fn parse_search_command(content: &str) -> Option<&str> {
-    let trimmed = content.trim();
-    trimmed
-        .strip_prefix("/search ")
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-}
+fn build_unified_planner_prompt(memory: &crate::types::MemoryContext) -> String {
+    let mut context_lines = Vec::new();
+    if let Some(summary) = &memory.summary {
+        context_lines.push(format!("Conversation summary: {summary}"));
+    }
 
-fn build_search_planner_prompt(memory: &crate::types::MemoryContext) -> String {
-    let mut context = String::new();
     if !memory.facts.is_empty() {
         let facts = memory
             .facts
@@ -491,41 +409,150 @@ fn build_search_planner_prompt(memory: &crate::types::MemoryContext) -> String {
             .map(|fact| format!("{}={}", fact.key, fact.value))
             .collect::<Vec<_>>()
             .join("; ");
-        context = format!("Known user facts: {facts}");
+        context_lines.push(format!("Known user facts: {facts}"));
     }
 
+    if !memory.recent_messages.is_empty() {
+        context_lines.push(build_recent_context_block(&memory.recent_messages));
+    }
+
+    let context_block = if context_lines.is_empty() {
+        String::new()
+    } else {
+        format!("Context:\n{}\n", context_lines.join("\n"))
+    };
+
     format!(
-        "You are a tool router for CompanionPilot.
-Decide whether web search is required to answer accurately.
-If search is required, produce a short search query.
-Return strict JSON with no markdown:
-{{\"use_search\": true|false, \"query\": \"...\"}}
-Set query to empty string when use_search is false.
+        "You are the unified planner for CompanionPilot.
+Decide both tool usage and memory write for one user message.
+Return strict JSON only (no markdown, no prose) with this exact schema:
+{{
+  \"tool_calls\": [{{\"tool_name\":\"...\",\"args\":{{...}}}}],
+  \"memory\": {{
+    \"store\": true|false,
+    \"key\": \"...\",
+    \"value\": \"...\",
+    \"confidence\": 0.0-1.0
+  }},
+  \"rationale\": \"short reason\"
+}}
+Tool calls are executed sequentially in listed order.
+There are no manual commands or manual overrides: all tool usage must come from this decision.
+If no tool is needed, return an empty tool_calls array.
+If memory should not be stored, set store=false and key/value to empty strings.
+Store only durable personal facts (identity, preferences, recurring goals, corrections).
+Do not store one-off requests or transient states.
+Use web search for latest/current/news/prices/weather or unknown factual claims.
+Tool inventory:
 {}
-Rules:
-- If the user explicitly asks to search, google, find, look up, browse, compare options, or discover similar projects/tools, set use_search=true.
-- If the user asks for results from \"the web\", \"internet\", or says \"just google it\", set use_search=true.
-- If the user asks for recommendations that depend on currently available options, set use_search=true.
-- Use search for time-sensitive, latest/current, news, prices, weather, or unknown factual claims.
-- Do not use search for casual conversation or personal memory recall.
-- Keep query concise and retrieval-oriented (3-12 words), avoiding filler words.
-Examples:
-- User: \"Just google it.\" -> {{\"use_search\":true,\"query\":\"query based on user's last request\"}}
-- User: \"Search for some similar AI project like the one I am building.\" -> {{\"use_search\":true,\"query\":\"similar AI companion orchestrator projects\"}}
-- User: \"Find alternatives to Tavily for AI search.\" -> {{\"use_search\":true,\"query\":\"Tavily alternatives AI search API\"}}
-- User: \"What did I just tell you?\" -> {{\"use_search\":false,\"query\":\"\"}}",
-        context
+{}",
+        build_tool_inventory_for_planner(),
+        context_block
     )
 }
 
-#[derive(Debug, Deserialize)]
-struct SearchPlan {
-    use_search: bool,
-    query: String,
+fn build_tool_inventory_for_planner() -> &'static str {
+    r#"[
+  {
+    "tool_name": "web_search",
+    "args_schema": {
+      "query": "string (required, non-empty)",
+      "max_results": "integer 1-10 (optional, default 5)"
+    },
+    "when_to_use": "Need external factual information, latest/current info, or web-sourced recommendations.",
+    "when_not_to_use": "Casual chat, personal memory recall, or when the answer can be provided from context."
+  }
+]"#
 }
 
-fn parse_planner_output(raw: &str) -> Result<SearchPlan, serde_json::Error> {
+fn parse_unified_plan(raw: &str) -> Result<UnifiedPlan, serde_json::Error> {
     parse_json_plan(raw)
+}
+
+fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolCall> {
+    let mut sanitized_calls = Vec::new();
+
+    for planned_call in planned_calls {
+        if sanitized_calls.len() >= MAX_PLANNED_TOOL_CALLS {
+            break;
+        }
+        match planned_call.tool_name.as_str() {
+            "web_search" => {
+                let query = planned_call
+                    .args
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if query.is_empty() {
+                    debug!("dropping planner web_search call with empty query");
+                    continue;
+                }
+
+                let max_results = planned_call
+                    .args
+                    .get("max_results")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(5)
+                    .clamp(1, 10);
+
+                sanitized_calls.push(ToolCall {
+                    tool_name: "web_search".to_owned(),
+                    args: json!({
+                        "query": query,
+                        "max_results": max_results
+                    }),
+                });
+            }
+            other => {
+                debug!(tool_name = other, "dropping unknown planner tool call");
+            }
+        }
+    }
+
+    sanitized_calls
+}
+
+fn memory_decision_from_plan(plan: PlannedMemory) -> MemoryDecision {
+    if !plan.store {
+        return MemoryDecision::Skip {
+            reason: "planner_no_store",
+        };
+    }
+
+    let key = sanitize_memory_key(&plan.key);
+    let value = clean_memory_value(&plan.value);
+    if key.is_empty() || value.is_empty() {
+        return MemoryDecision::Skip {
+            reason: "planner_invalid_fact",
+        };
+    }
+
+    MemoryDecision::Store {
+        fact: MemoryFact {
+            key,
+            value,
+            confidence: plan.confidence.clamp(0.0, 1.0),
+            source: "user_message".to_owned(),
+            updated_at: Utc::now(),
+        },
+        rationale: "model_planner",
+    }
+}
+
+fn memory_payload(memory: &MemoryDecision) -> Value {
+    match memory {
+        MemoryDecision::Store { fact, .. } => json!({
+            "store": true,
+            "key": fact.key,
+            "value": fact.value,
+            "confidence": fact.confidence
+        }),
+        MemoryDecision::Skip { reason } => json!({
+            "store": false,
+            "reason": reason
+        }),
+    }
 }
 
 fn truncate_for_log(input: &str, max_len: usize) -> String {
@@ -535,45 +562,6 @@ fn truncate_for_log(input: &str, max_len: usize) -> String {
         result.push_str("...");
     }
     result
-}
-
-fn build_memory_planner_prompt(memory: &crate::types::MemoryContext) -> String {
-    let mut context = String::new();
-    if !memory.facts.is_empty() {
-        let facts = memory
-            .facts
-            .iter()
-            .map(|fact| format!("{}={}", fact.key, fact.value))
-            .collect::<Vec<_>>()
-            .join("; ");
-        context = format!("Existing user facts: {facts}");
-    }
-
-    format!(
-        "You are a memory router for CompanionPilot.
-Decide if the user's message should be stored as long-term memory.
-Return strict JSON only (no markdown):
-{{\"store\": true|false, \"key\": \"...\", \"value\": \"...\", \"confidence\": 0.0-1.0}}
-If store=false, set key and value to empty strings.
-{}
-Rules:
-- Store only durable personal facts (identity, preferences, recurring goals, corrections).
-- Do not store one-off requests or transient states.
-- If user corrects a previous fact, store corrected value under the same key.",
-        context
-    )
-}
-
-#[derive(Debug, Deserialize)]
-struct MemoryPlan {
-    store: bool,
-    key: String,
-    value: String,
-    confidence: f32,
-}
-
-fn parse_memory_plan(raw: &str) -> Result<MemoryPlan, serde_json::Error> {
-    parse_json_plan(raw)
 }
 
 fn parse_json_plan<T: DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
@@ -641,6 +629,42 @@ fn extract_first_json_object(raw: &str) -> Option<&str> {
     None
 }
 
+fn format_tool_outputs(outputs: &[ExecutedToolOutput]) -> String {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| {
+            format!(
+                "{}. Tool: {}\nArgs: {}\nOutput:\n{}",
+                index + 1,
+                output.tool_name,
+                output.args,
+                output.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn fallback_tool_output_text(outputs: &[ExecutedToolOutput]) -> String {
+    outputs
+        .iter()
+        .map(|output| output.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn dedupe_citations(citations: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for citation in citations {
+        if deduped.iter().any(|existing| existing == &citation) {
+            continue;
+        }
+        deduped.push(citation);
+    }
+    deduped
+}
+
 fn sanitize_memory_key(raw: &str) -> String {
     let mut normalized = raw
         .chars()
@@ -658,95 +682,6 @@ fn sanitize_memory_key(raw: &str) -> String {
     }
 
     normalized.trim_matches('_').to_owned()
-}
-
-fn fallback_search_query(input: &str) -> String {
-    const STOPWORDS: &[&str] = &[
-        "a", "an", "and", "are", "be", "can", "could", "for", "get", "i", "is", "it", "latest",
-        "me", "my", "of", "on", "please", "search", "tell", "the", "to", "up", "what", "whats",
-        "with", "you", "today",
-    ];
-
-    let mut tokens = Vec::new();
-    for raw in input.split_whitespace() {
-        let cleaned = raw
-            .trim_matches(|character: char| !character.is_alphanumeric())
-            .to_lowercase();
-        if cleaned.is_empty() {
-            continue;
-        }
-        if STOPWORDS.contains(&cleaned.as_str()) {
-            continue;
-        }
-        tokens.push(cleaned);
-        if tokens.len() >= 8 {
-            break;
-        }
-    }
-
-    if tokens.is_empty() {
-        return input.trim().to_owned();
-    }
-
-    tokens.join(" ")
-}
-
-fn fallback_search_query_with_context(input: &str, memory: &crate::types::MemoryContext) -> String {
-    let direct_query = fallback_search_query(input);
-    if !is_generic_search_query(&direct_query) {
-        return direct_query;
-    }
-
-    let normalized_input = normalize_for_compare(input);
-    for line in memory.recent_messages.iter().rev() {
-        let Some(previous_user_message) = line.strip_prefix("user: ").map(str::trim) else {
-            continue;
-        };
-        if normalize_for_compare(previous_user_message) == normalized_input {
-            continue;
-        }
-        let candidate = fallback_search_query(previous_user_message);
-        if !is_generic_search_query(&candidate) {
-            return candidate;
-        }
-    }
-
-    direct_query
-}
-
-fn is_generic_search_query(query: &str) -> bool {
-    let normalized = normalize_for_compare(query);
-    if normalized.is_empty() {
-        return true;
-    }
-
-    const GENERIC_TOKENS: &[&str] = &[
-        "search", "google", "find", "look", "lookup", "web", "internet", "it", "this", "that",
-        "just",
-    ];
-
-    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return true;
-    }
-
-    tokens.len() <= 2 && tokens.iter().all(|token| GENERIC_TOKENS.contains(token))
-}
-
-fn normalize_for_compare(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() || character.is_whitespace() {
-                character.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn build_system_prompt(memory: &crate::types::MemoryContext) -> String {
@@ -818,13 +753,12 @@ mod tests {
         model::MockModelProvider,
         safety::SafetyPolicy,
         tools::ToolRegistry,
-        types::{MemoryContext, MessageCtx},
+        types::MessageCtx,
     };
 
     use super::{
-        DefaultChatOrchestrator, clean_memory_value, fallback_search_query,
-        fallback_search_query_with_context, normalize_for_compare, parse_planner_output,
-        sanitize_memory_key,
+        DefaultChatOrchestrator, PlannedToolCall, clean_memory_value, parse_unified_plan,
+        sanitize_memory_key, sanitize_planned_tool_calls,
     };
 
     #[tokio::test]
@@ -858,7 +792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invokes_search_tool_on_command() {
+    async fn search_command_is_not_a_manual_override() {
         let memory = Arc::new(InMemoryMemoryStore::default());
         let orchestrator = DefaultChatOrchestrator::new(
             Arc::new(MockModelProvider),
@@ -876,36 +810,9 @@ mod tests {
                 content: "/search rust".into(),
                 timestamp: Utc::now(),
             })
-            .await;
-
-        assert!(result.is_err());
-        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(err.contains("web_search tool is not configured"));
-
-        let _ = json!({});
-    }
-
-    #[tokio::test]
-    async fn auto_search_uses_tool_on_latest_question() {
-        let memory = Arc::new(InMemoryMemoryStore::default());
-        let orchestrator = DefaultChatOrchestrator::new(
-            Arc::new(MockModelProvider),
-            memory,
-            Arc::new(ToolRegistry::default()),
-            SafetyPolicy::default(),
-        );
-
-        let result = orchestrator
-            .handle_message(MessageCtx {
-                message_id: "3".into(),
-                user_id: "u3".into(),
-                guild_id: "g1".into(),
-                channel_id: "c1".into(),
-                content: "What is the latest Rust release today?".into(),
-                timestamp: Utc::now(),
-            })
             .await
-            .expect("message should succeed when planner decides no search");
+            .expect("planner should be allowed to skip tool usage");
+
         assert!(result.tool_calls.is_empty());
     }
 
@@ -990,19 +897,6 @@ mod tests {
     }
 
     #[test]
-    fn fallback_query_compacts_user_prompt() {
-        let query = fallback_search_query("What is the latest Rust release today?");
-        assert_eq!(query, "rust release");
-    }
-
-    #[test]
-    fn normalize_compare_ignores_formatting() {
-        let a = normalize_for_compare("What is  Rust?  ");
-        let b = normalize_for_compare("what is rust");
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn sanitize_memory_key_normalizes_words() {
         assert_eq!(sanitize_memory_key("Favorite Game"), "favorite_game");
     }
@@ -1013,26 +907,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_plan_from_wrapped_json() {
-        let raw =
-            "Use this decision:\n{\"use_search\":true,\"query\":\"rust release date\"}\nDone.";
-        let plan = parse_planner_output(raw).expect("wrapped JSON should parse");
-        assert!(plan.use_search);
-        assert_eq!(plan.query, "rust release date");
+    fn parse_unified_plan_from_wrapped_json() {
+        let raw = "Result:\n{\"tool_calls\":[],\"memory\":{\"store\":false,\"key\":\"\",\"value\":\"\",\"confidence\":0.0},\"rationale\":\"none\"}\nDone.";
+        let plan = parse_unified_plan(raw).expect("wrapped JSON should parse");
+        assert!(plan.tool_calls.is_empty());
+        assert!(!plan.memory.store);
     }
 
     #[test]
-    fn context_fallback_uses_previous_user_turn_for_generic_command() {
-        let memory = MemoryContext {
-            summary: None,
-            recent_messages: vec![
-                "user: Search for similar ai companion projects in Rust".to_owned(),
-                "assistant: Sure, I can do that.".to_owned(),
-            ],
-            facts: Vec::new(),
-        };
+    fn sanitize_planned_tool_calls_drops_unknown_and_limits_to_max() {
+        let mut planned_calls = Vec::new();
+        planned_calls.push(PlannedToolCall {
+            tool_name: "unknown_tool".to_owned(),
+            args: json!({}),
+        });
 
-        let query = fallback_search_query_with_context("Just google it.", &memory);
-        assert_eq!(query, "similar ai companion projects in rust");
+        for index in 0..8 {
+            planned_calls.push(PlannedToolCall {
+                tool_name: "web_search".to_owned(),
+                args: json!({
+                    "query": format!("rust query {index}"),
+                    "max_results": 5
+                }),
+            });
+        }
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 6);
+        assert_eq!(sanitized[0].tool_name, "web_search");
+        assert_eq!(sanitized[5].tool_name, "web_search");
     }
 }

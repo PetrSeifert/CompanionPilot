@@ -12,7 +12,7 @@ CompanionPilot is a Rust-first AI orchestrator for Discord chat with long/short-
 - HTTP API for health, chat, and dashboard data (`axum`)
 - Built-in web dashboard at `/app` for users/memory/chats
 - Dashboard now includes tool-call history (query, result/error, source)
-- Dashboard now includes planner decision history (search/memory decisions)
+- Dashboard now includes planner decision history (unified tool+memory decisions)
 - Dashboard supports manual memory fact add/update/delete and conversation message deletion/clear
 - Local dev infra (`docker-compose` with Postgres + Redis)
 - Railway deployment entry (`railway.json`)
@@ -70,8 +70,8 @@ http://localhost:8080/app
 
 - Set `DISCORD_TOKEN` in `.env`.
 - Mention the bot or DM it.
-- Use `/search <query>` in Discord as a manual search override.
-- CompanionPilot can also decide to run web search automatically for time-sensitive/factual questions.
+- CompanionPilot decides tool usage automatically from a unified planner decision.
+- Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 - Short-term memory is injected from recent channel turns, even when no long-term fact is stored.
 
@@ -94,7 +94,7 @@ OpenRouter settings:
 
 - If `OPENROUTER_API_KEY` is missing (or provider is `mock`), the app uses the mock model provider.
 - If `DATABASE_URL` is missing, memory uses in-process storage.
-- If `TAVILY_API_KEY` is missing, `/search` returns a configuration error.
+- If `TAVILY_API_KEY` is missing, planner-selected `web_search` calls return a configuration error.
 - Dashboard endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
 
 ## Search diagnostics
@@ -107,7 +107,7 @@ RUST_LOG=companionpilot=debug,info
 
 Then look for:
 
-- `web search selected` (decision + query + source)
-- `web search tool completed` (search finished)
+- `tool call selected by unified planner` (tool + args selected)
+- `tool call completed` (tool finished)
 - `tavily web search start` / `tavily web search success` (actual Tavily call path)
-- `web search skipped` (why it was not used)
+- `planner fallback: running without tools and without memory write` (planner failure fallback)
