@@ -80,6 +80,7 @@ struct PlannedMemory {
 struct ExecutedToolOutput {
     tool_name: String,
     args: Value,
+    success: bool,
     text: String,
 }
 
@@ -158,30 +159,36 @@ impl DefaultChatOrchestrator {
         let mut citations = Vec::new();
 
         for tool_call in planned_tool_calls {
+            let tool_name = tool_call.tool_name;
             let args = tool_call.args.clone();
+            executed_tool_calls.push(ToolCall {
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            });
             info!(
                 user_id = %ctx.user_id,
                 guild_id = %ctx.guild_id,
                 channel_id = %ctx.channel_id,
-                tool_name = %tool_call.tool_name,
+                tool_name = %tool_name,
                 args_json = %args,
                 "tool call selected by unified planner"
             );
 
-            let tool_result = match self.tools.execute(&tool_call.tool_name, args.clone()).await {
+            let tool_result = match self.tools.execute(&tool_name, args.clone()).await {
                 Ok(result) => result,
                 Err(error) => {
+                    let error_text = error.to_string();
                     self.record_tool_call(ToolCallRecord {
                         user_id: ctx.user_id.clone(),
                         guild_id: ctx.guild_id.clone(),
                         channel_id: ctx.channel_id.clone(),
-                        tool_name: tool_call.tool_name.clone(),
+                        tool_name: tool_name.clone(),
                         source: "unified_planner".to_owned(),
                         args_json: args.to_string(),
                         result_text: String::new(),
                         citations: Vec::new(),
                         success: false,
-                        error: Some(error.to_string()),
+                        error: Some(error_text.clone()),
                         timestamp: Utc::now(),
                     })
                     .await;
@@ -189,11 +196,17 @@ impl DefaultChatOrchestrator {
                         user_id = %ctx.user_id,
                         guild_id = %ctx.guild_id,
                         channel_id = %ctx.channel_id,
-                        tool_name = %tool_call.tool_name,
+                        tool_name = %tool_name,
                         ?error,
-                        "tool call failed"
+                        "tool call failed; continuing final answer synthesis"
                     );
-                    return Err(error);
+                    tool_outputs.push(ExecutedToolOutput {
+                        tool_name,
+                        args,
+                        success: false,
+                        text: error_text,
+                    });
+                    continue;
                 }
             };
 
@@ -201,7 +214,7 @@ impl DefaultChatOrchestrator {
                 user_id: ctx.user_id.clone(),
                 guild_id: ctx.guild_id.clone(),
                 channel_id: ctx.channel_id.clone(),
-                tool_name: tool_call.tool_name.clone(),
+                tool_name: tool_name.clone(),
                 source: "unified_planner".to_owned(),
                 args_json: args.to_string(),
                 result_text: truncate_for_log(&tool_result.text, 1200),
@@ -214,19 +227,16 @@ impl DefaultChatOrchestrator {
 
             info!(
                 user_id = %ctx.user_id,
-                tool_name = %tool_call.tool_name,
+                tool_name = %tool_name,
                 result_citations = tool_result.citations.len(),
                 "tool call completed"
             );
 
             citations.extend(tool_result.citations);
-            executed_tool_calls.push(ToolCall {
-                tool_name: tool_call.tool_name.clone(),
-                args: args.clone(),
-            });
             tool_outputs.push(ExecutedToolOutput {
-                tool_name: tool_call.tool_name,
+                tool_name,
                 args,
+                success: true,
                 text: tool_result.text,
             });
         }
@@ -654,11 +664,18 @@ fn format_tool_outputs(outputs: &[ExecutedToolOutput]) -> String {
         .iter()
         .enumerate()
         .map(|(index, output)| {
+            let (status, label) = if output.success {
+                ("success", "Output")
+            } else {
+                ("error", "Error")
+            };
             format!(
-                "{}. Tool: {}\nArgs: {}\nOutput:\n{}",
+                "{}. Tool: {}\nArgs: {}\nStatus: {}\n{}:\n{}",
                 index + 1,
                 output.tool_name,
                 output.args,
+                status,
+                label,
                 output.text
             )
         })
@@ -669,7 +686,13 @@ fn format_tool_outputs(outputs: &[ExecutedToolOutput]) -> String {
 fn fallback_tool_output_text(outputs: &[ExecutedToolOutput]) -> String {
     outputs
         .iter()
-        .map(|output| output.text.clone())
+        .map(|output| {
+            if output.success {
+                format!("{} output:\n{}", output.tool_name, output.text)
+            } else {
+                format!("{} error:\n{}", output.tool_name, output.text)
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -843,6 +866,34 @@ mod tests {
             .expect("planner should be allowed to skip tool usage");
 
         assert!(result.tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_failure_is_included_in_final_synthesis_context() {
+        let memory = Arc::new(InMemoryMemoryStore::default());
+        let orchestrator = DefaultChatOrchestrator::new(
+            Arc::new(MockModelProvider),
+            memory.clone(),
+            Arc::new(ToolRegistry::default()),
+            SafetyPolicy::default(),
+        );
+
+        let result = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "3".into(),
+                user_id: "u3".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "search the web for rust async traits".into(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("tool failure should still synthesize a final answer");
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "web_search");
+        assert!(result.text.contains("Status: error"));
+        assert!(result.text.contains("web_search tool is not configured"));
     }
 
     #[tokio::test]
