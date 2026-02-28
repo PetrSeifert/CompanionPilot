@@ -42,11 +42,33 @@ pub struct ToolCall {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolCallTiming {
+    pub tool_name: String,
+    pub duration_ms: u64,
+    pub success: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReplyTimings {
+    pub total_ms: u64,
+    pub load_context_ms: u64,
+    pub record_user_message_ms: u64,
+    pub planner_ms: u64,
+    pub tool_execution_ms: u64,
+    pub final_model_ms: u64,
+    pub memory_write_ms: u64,
+    pub record_assistant_message_ms: u64,
+    pub tool_calls: Vec<ToolCallTiming>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrchestratorReply {
     pub text: String,
     pub citations: Vec<String>,
     pub tool_calls: Vec<ToolCall>,
     pub safety_flags: Vec<String>,
+    #[serde(default)]
+    pub timings: ReplyTimings,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

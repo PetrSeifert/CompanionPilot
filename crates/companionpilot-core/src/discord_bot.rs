@@ -6,7 +6,7 @@ use serenity::{
     model::{channel::Message, gateway::GatewayIntents},
     prelude::*,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{orchestrator::DefaultChatOrchestrator, types::MessageCtx};
 
@@ -37,6 +37,29 @@ impl EventHandler for Handler {
 
         match self.orchestrator.handle_message(request).await {
             Ok(reply) => {
+                if reply.timings.total_ms >= 30_000 {
+                    warn!(
+                        user_id = %msg.author.id,
+                        channel_id = %msg.channel_id,
+                        message_id = %msg.id,
+                        total_ms = reply.timings.total_ms,
+                        planner_ms = reply.timings.planner_ms,
+                        tool_execution_ms = reply.timings.tool_execution_ms,
+                        final_model_ms = reply.timings.final_model_ms,
+                        "slow Discord reply detected"
+                    );
+                } else {
+                    info!(
+                        user_id = %msg.author.id,
+                        channel_id = %msg.channel_id,
+                        message_id = %msg.id,
+                        total_ms = reply.timings.total_ms,
+                        planner_ms = reply.timings.planner_ms,
+                        tool_execution_ms = reply.timings.tool_execution_ms,
+                        final_model_ms = reply.timings.final_model_ms,
+                        "Discord reply ready"
+                    );
+                }
                 if let Err(error) = msg.channel_id.say(&ctx.http, reply.text).await {
                     error!(?error, "failed to send Discord message");
                 }

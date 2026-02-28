@@ -1046,6 +1046,36 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       throw new Error(text || `request failed (${resp.status})`);
     }
 
+    let lastSendStatus = "Ready";
+
+    function fmtMs(ms) {
+      if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
+      if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
+      return `${Math.round(ms)}ms`;
+    }
+
+    function buildSendTimingStatus(clientMs, timings) {
+      const parts = [];
+      const clientLabel = fmtMs(clientMs);
+      if (clientLabel) parts.push(`Client ${clientLabel}`);
+
+      if (timings && typeof timings.total_ms === "number") {
+        parts.push(`Server ${fmtMs(timings.total_ms)}`);
+      }
+      if (timings && typeof timings.final_model_ms === "number") {
+        parts.push(`Model ${fmtMs(timings.final_model_ms)}`);
+      }
+      if (
+        timings &&
+        typeof timings.tool_execution_ms === "number" &&
+        timings.tool_execution_ms > 0
+      ) {
+        parts.push(`Tools ${fmtMs(timings.tool_execution_ms)}`);
+      }
+
+      return parts.length ? parts.join(" | ") : "Ready";
+    }
+
     function setSendingState(sending) {
       isSending = sending;
       sendBtn.disabled = sending;
@@ -1053,7 +1083,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       systemPromptEl.disabled = sending;
       systemPromptDefaultBtn.disabled = sending;
       sendBtn.textContent = sending ? "Sending..." : "Send";
-      sendStatusEl.textContent = sending ? "Waiting for response..." : "Ready";
+      sendStatusEl.textContent = sending ? "Waiting for response..." : lastSendStatus;
       sendStatusEl.classList.toggle("sending", sending);
     }
 
@@ -1161,6 +1191,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         plannersEl.innerHTML  = '<div class="empty">No planner decisions recorded.</div>';
         chatEl.innerHTML     = '<div class="empty">No chat history loaded.</div>';
         selectedUser = null;
+        lastSendStatus = "No users";
         sendStatusEl.textContent = "No users";
         sendStatusEl.classList.remove("sending");
         userCountEl.textContent    = "0";
@@ -1196,7 +1227,10 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       }
 
       if (!isSending) {
-        sendStatusEl.textContent = "Ready";
+        if (lastSendStatus === "No users") {
+          lastSendStatus = "Ready";
+        }
+        sendStatusEl.textContent = lastSendStatus;
         sendStatusEl.classList.remove("sending");
       }
     }
@@ -1299,6 +1333,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       promptEl.value = "";
       addOptimisticUserBubble(content);
       addPendingAssistantBubble();
+      const requestStartedAt = performance.now();
       try {
         const systemPrompt = systemPromptEl.value.trim();
         const payload = { content };
@@ -1311,6 +1346,9 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
           body: JSON.stringify(payload)
         });
         await expectOk(resp);
+        const reply = await resp.json();
+        const clientMs = performance.now() - requestStartedAt;
+        lastSendStatus = buildSendTimingStatus(clientMs, reply.timings);
         removeOptimisticUserBubble();
         removePendingAssistantBubble();
         await renderSelectedUser();
@@ -1319,6 +1357,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         removeOptimisticUserBubble();
         removePendingAssistantBubble();
         chatErrorEl.textContent = `Send failed: ${error.message || error}`;
+        lastSendStatus = "Ready";
         promptEl.value = content;
       } finally {
         setSendingState(false);

@@ -19,6 +19,7 @@ Workspace layout:
 - Dashboard now includes tool-call history (query, result/error, source)
 - Dashboard now includes planner decision history (unified tool+memory decisions)
 - Dashboard supports manual memory fact add/update/delete and conversation message deletion/clear
+- Reply timing telemetry (planner/tools/model/memory stage durations)
 - Local dev infra (`docker-compose` with Postgres + Redis)
 - Railway deployment entry (`railway.json`)
 
@@ -116,3 +117,5 @@ Then look for:
 - `tool call completed` (tool finished)
 - `tavily web search start` / `tavily web search success` (actual Tavily call path)
 - `planner fallback: running without tools and without memory write` (planner failure fallback)
+- `reply completed` (per-message timing summary)
+- `slow reply detected` / `slow Discord reply detected` (slow-path warnings, threshold 30s)

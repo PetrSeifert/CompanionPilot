@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -12,11 +12,12 @@ use crate::{
     tools::ToolExecutor,
     types::{
         ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, OrchestratorReply,
-        PlannerDecisionRecord, ToolCall, ToolCallRecord,
+        PlannerDecisionRecord, ReplyTimings, ToolCall, ToolCallRecord, ToolCallTiming,
     },
 };
 
 const MAX_PLANNED_TOOL_CALLS: usize = 6;
+const SLOW_REPLY_THRESHOLD_MS: u64 = 30_000;
 
 pub struct DefaultChatOrchestrator {
     model: Arc<dyn ModelProvider>,
@@ -109,14 +110,20 @@ impl DefaultChatOrchestrator {
         ctx: MessageCtx,
         system_prompt_override: Option<String>,
     ) -> anyhow::Result<OrchestratorReply> {
+        let request_started_at = Instant::now();
         let system_prompt_override = system_prompt_override
             .map(|prompt| prompt.trim().to_owned())
             .filter(|prompt| !prompt.is_empty());
         let safety_flags = self.safety.validate_user_message(&ctx.content);
+
+        let load_context_started_at = Instant::now();
         let memory_context = self
             .memory
             .load_context(&ctx.user_id, &ctx.guild_id, &ctx.channel_id)
             .await?;
+        let load_context_ms = elapsed_ms(load_context_started_at);
+
+        let record_user_message_started_at = Instant::now();
         self.memory
             .record_chat_message(ChatMessageRecord {
                 id: ctx.message_id.clone(),
@@ -128,10 +135,13 @@ impl DefaultChatOrchestrator {
                 timestamp: ctx.timestamp,
             })
             .await?;
+        let record_user_message_ms = elapsed_ms(record_user_message_started_at);
 
+        let planner_started_at = Instant::now();
         let planner_decision = self
             .decide_unified_plan(&ctx.content, &memory_context)
             .await;
+        let planner_ms = elapsed_ms(planner_started_at);
         self.record_unified_planner_decision(&ctx, &planner_decision)
             .await;
 
@@ -157,8 +167,11 @@ impl DefaultChatOrchestrator {
         let mut executed_tool_calls = Vec::new();
         let mut tool_outputs = Vec::new();
         let mut citations = Vec::new();
+        let mut tool_timings = Vec::new();
 
+        let tool_execution_started_at = Instant::now();
         for tool_call in planned_tool_calls {
+            let tool_started_at = Instant::now();
             let tool_name = tool_call.tool_name;
             let args = tool_call.args.clone();
             executed_tool_calls.push(ToolCall {
@@ -192,11 +205,18 @@ impl DefaultChatOrchestrator {
                         timestamp: Utc::now(),
                     })
                     .await;
+                    let duration_ms = elapsed_ms(tool_started_at);
+                    tool_timings.push(ToolCallTiming {
+                        tool_name: tool_name.clone(),
+                        duration_ms,
+                        success: false,
+                    });
                     warn!(
                         user_id = %ctx.user_id,
                         guild_id = %ctx.guild_id,
                         channel_id = %ctx.channel_id,
                         tool_name = %tool_name,
+                        duration_ms,
                         ?error,
                         "tool call failed; continuing final answer synthesis"
                     );
@@ -225,9 +245,16 @@ impl DefaultChatOrchestrator {
             })
             .await;
 
+            let duration_ms = elapsed_ms(tool_started_at);
+            tool_timings.push(ToolCallTiming {
+                tool_name: tool_name.clone(),
+                duration_ms,
+                success: true,
+            });
             info!(
                 user_id = %ctx.user_id,
                 tool_name = %tool_name,
+                duration_ms,
                 result_citations = tool_result.citations.len(),
                 "tool call completed"
             );
@@ -240,7 +267,9 @@ impl DefaultChatOrchestrator {
                 text: tool_result.text,
             });
         }
+        let tool_execution_ms = elapsed_ms(tool_execution_started_at);
 
+        let final_model_started_at = Instant::now();
         let reply_text = if tool_outputs.is_empty() {
             self.model
                 .complete(ModelRequest {
@@ -275,7 +304,9 @@ impl DefaultChatOrchestrator {
                     fallback_tool_output_text(&tool_outputs)
                 })
         };
+        let final_model_ms = elapsed_ms(final_model_started_at);
 
+        let memory_write_started_at = Instant::now();
         match memory_decision {
             MemoryDecision::Store { fact, rationale } => {
                 info!(
@@ -295,25 +326,69 @@ impl DefaultChatOrchestrator {
                 );
             }
         }
+        let memory_write_ms = elapsed_ms(memory_write_started_at);
+
+        let record_assistant_message_started_at = Instant::now();
+        self.memory
+            .record_chat_message(ChatMessageRecord {
+                id: format!("{}-assistant", ctx.message_id),
+                user_id: ctx.user_id.clone(),
+                guild_id: ctx.guild_id.clone(),
+                channel_id: ctx.channel_id.clone(),
+                role: ChatRole::Assistant,
+                content: reply_text.clone(),
+                timestamp: Utc::now(),
+            })
+            .await?;
+        let record_assistant_message_ms = elapsed_ms(record_assistant_message_started_at);
+
+        let timings = ReplyTimings {
+            total_ms: elapsed_ms(request_started_at),
+            load_context_ms,
+            record_user_message_ms,
+            planner_ms,
+            tool_execution_ms,
+            final_model_ms,
+            memory_write_ms,
+            record_assistant_message_ms,
+            tool_calls: tool_timings,
+        };
+
+        if timings.total_ms >= SLOW_REPLY_THRESHOLD_MS {
+            warn!(
+                user_id = %ctx.user_id,
+                guild_id = %ctx.guild_id,
+                channel_id = %ctx.channel_id,
+                message_id = %ctx.message_id,
+                total_ms = timings.total_ms,
+                planner_ms = timings.planner_ms,
+                tool_execution_ms = timings.tool_execution_ms,
+                final_model_ms = timings.final_model_ms,
+                memory_write_ms = timings.memory_write_ms,
+                "slow reply detected"
+            );
+        } else {
+            info!(
+                user_id = %ctx.user_id,
+                guild_id = %ctx.guild_id,
+                channel_id = %ctx.channel_id,
+                message_id = %ctx.message_id,
+                total_ms = timings.total_ms,
+                planner_ms = timings.planner_ms,
+                tool_execution_ms = timings.tool_execution_ms,
+                final_model_ms = timings.final_model_ms,
+                memory_write_ms = timings.memory_write_ms,
+                "reply completed"
+            );
+        }
 
         let reply = OrchestratorReply {
             text: reply_text,
             citations: dedupe_citations(citations),
             tool_calls: executed_tool_calls,
             safety_flags,
+            timings,
         };
-
-        self.memory
-            .record_chat_message(ChatMessageRecord {
-                id: format!("{}-assistant", ctx.message_id),
-                user_id: ctx.user_id,
-                guild_id: ctx.guild_id,
-                channel_id: ctx.channel_id,
-                role: ChatRole::Assistant,
-                content: reply.text.clone(),
-                timestamp: Utc::now(),
-            })
-            .await?;
 
         Ok(reply)
     }
@@ -592,6 +667,14 @@ fn truncate_for_log(input: &str, max_len: usize) -> String {
         result.push_str("...");
     }
     result
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn parse_json_plan<T: DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
