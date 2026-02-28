@@ -780,16 +780,28 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     }
     .composer-actions {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       gap: 10px;
+      flex-wrap: wrap;
     }
-    .composer-buttons { display: flex; gap: 8px; align-items: center; }
+    .composer-buttons {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex: 0 0 auto;
+    }
     .send-status {
       font-size: .82rem;
       color: var(--muted);
       font-family: "IBM Plex Mono", monospace;
-      white-space: nowrap;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.35;
+      flex: 1 1 260px;
+      min-width: 0;
+      text-align: right;
     }
     .send-status.sending { color: var(--accent); }
 
@@ -872,6 +884,8 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       .memory-list, .tool-list, .planner-list { max-height: 28vh; }
       .stack     { height: auto; }
       .stack-section { flex: none; }
+      .composer-actions { justify-content: flex-start; }
+      .send-status { flex-basis: 100%; text-align: left; }
     }
   </style>
 </head>
