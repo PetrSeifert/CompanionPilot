@@ -1276,6 +1276,8 @@ pre.json-block {
     facts: [],
     toolCalls: [],
     decisions: [],
+    msgToolCalls: [],
+    msgDecisions: [],
     loading: false,
     modalResolve: null,
   };
@@ -1791,11 +1793,19 @@ pre.json-block {
 
     try {
       switch (tab) {
-        case 'messages':
-          state.messages = await api('GET', '/api/users/' + enc + '/messages?limit=200');
+        case 'messages': {
+          const [msgs, tcs, decs] = await Promise.all([
+            api('GET', '/api/users/' + enc + '/messages?limit=200'),
+            api('GET', '/api/users/' + enc + '/tool-calls?limit=200'),
+            api('GET', '/api/users/' + enc + '/decisions?limit=200'),
+          ]);
+          state.messages = msgs;
+          state.msgToolCalls = tcs;
+          state.msgDecisions = decs;
           renderMessages();
           composerWrapper.classList.add('visible');
           break;
+        }
         case 'facts':
           state.facts = await api('GET', '/api/users/' + enc + '/facts?limit=200');
           renderFacts();
@@ -1831,7 +1841,10 @@ pre.json-block {
     }
     empty.style.display = 'none';
 
-    state.messages.forEach(msg => {
+    const allToolCalls = state.msgToolCalls || [];
+    const allDecisions = state.msgDecisions || [];
+
+    state.messages.forEach((msg, i) => {
       const bubble = document.createElement('div');
       bubble.className = 'msg-bubble role-' + (msg.role || 'user');
 
@@ -1853,6 +1866,72 @@ pre.json-block {
 
       bubble.appendChild(content);
       bubble.appendChild(meta);
+
+      // For assistant messages, find tool calls and decisions that occurred
+      // between the preceding user message and this assistant message
+      if (msg.role === 'assistant') {
+        const msgTime = new Date(msg.timestamp).getTime();
+        // Find the preceding user message timestamp as the window start
+        let windowStart = 0;
+        for (let j = i - 1; j >= 0; j--) {
+          if (state.messages[j].role === 'user') {
+            windowStart = new Date(state.messages[j].timestamp).getTime();
+            break;
+          }
+        }
+
+        const matchedTools = allToolCalls.filter(tc => {
+          const t = new Date(tc.timestamp).getTime();
+          return t >= windowStart && t <= msgTime;
+        });
+
+        const matchedDecisions = allDecisions.filter(dec => {
+          const t = new Date(dec.timestamp).getTime();
+          return t >= windowStart && t <= msgTime;
+        });
+
+        if (matchedTools.length > 0 || matchedDecisions.length > 0) {
+          const details = document.createElement('div');
+          details.className = 'reply-details';
+
+          matchedDecisions.forEach(dec => {
+            const item = document.createElement('div');
+            item.className = 'reply-detail-item';
+
+            const icon = document.createElement('span');
+            icon.className = 'detail-icon decision';
+            icon.textContent = 'PLAN';
+
+            const label = document.createElement('span');
+            label.textContent = dec.planner + ' \u2192 ' + dec.decision;
+
+            item.appendChild(icon);
+            item.appendChild(label);
+            details.appendChild(item);
+          });
+
+          matchedTools.forEach(tc => {
+            const item = document.createElement('div');
+            item.className = 'reply-detail-item';
+
+            const icon = document.createElement('span');
+            icon.className = 'detail-icon tool';
+            icon.textContent = tc.success ? 'TOOL' : 'FAIL';
+            if (!tc.success) icon.style.borderColor = 'rgba(196, 79, 79, 0.3)';
+            if (!tc.success) icon.style.color = 'var(--rose)';
+
+            const label = document.createElement('span');
+            label.textContent = tc.tool_name;
+
+            item.appendChild(icon);
+            item.appendChild(label);
+            details.appendChild(item);
+          });
+
+          bubble.appendChild(details);
+        }
+      }
+
       list.appendChild(bubble);
     });
 
@@ -2314,63 +2393,6 @@ pre.json-block {
     }
   }
 
-  function buildReplyDetails(reply) {
-    // Build detail elements for tool calls and timing from the OrchestratorReply
-    const frag = document.createDocumentFragment();
-
-    if (reply.tool_calls && reply.tool_calls.length > 0) {
-      const details = document.createElement('div');
-      details.className = 'reply-details';
-
-      reply.tool_calls.forEach(tc => {
-        const item = document.createElement('div');
-        item.className = 'reply-detail-item';
-
-        const icon = document.createElement('span');
-        icon.className = 'detail-icon tool';
-        icon.textContent = 'TOOL';
-
-        const label = document.createElement('span');
-        label.textContent = tc.tool_name;
-        if (tc.args) {
-          const argKeys = Object.keys(tc.args);
-          if (argKeys.length > 0) {
-            label.textContent += '(' + argKeys.join(', ') + ')';
-          }
-        }
-
-        item.appendChild(icon);
-        item.appendChild(label);
-        details.appendChild(item);
-      });
-
-      // Show timings summary
-      if (reply.timings && reply.timings.total_ms > 0) {
-        const timingEl = document.createElement('div');
-        timingEl.className = 'reply-timings';
-        const parts = [];
-        if (reply.timings.planner_ms > 0) parts.push('planner ' + reply.timings.planner_ms + 'ms');
-        if (reply.timings.tool_execution_ms > 0) parts.push('tools ' + reply.timings.tool_execution_ms + 'ms');
-        if (reply.timings.final_model_ms > 0) parts.push('model ' + reply.timings.final_model_ms + 'ms');
-        parts.push('total ' + reply.timings.total_ms + 'ms');
-        timingEl.textContent = parts.join(' · ');
-        details.appendChild(timingEl);
-      }
-
-      frag.appendChild(details);
-    } else if (reply.timings && reply.timings.total_ms > 0) {
-      const details = document.createElement('div');
-      details.className = 'reply-details';
-      const timingEl = document.createElement('div');
-      timingEl.className = 'reply-timings';
-      timingEl.textContent = 'total ' + reply.timings.total_ms + 'ms';
-      details.appendChild(timingEl);
-      frag.appendChild(details);
-    }
-
-    return frag;
-  }
-
   async function sendMessage() {
     const content = composerInput.value.trim();
     if (!content || !state.selectedUserId) return;
@@ -2396,19 +2418,17 @@ pre.json-block {
       const optimistic = $('#optimistic-msg');
       if (optimistic) optimistic.remove();
 
-      // Refresh messages from server to get proper IDs/timestamps
+      // Refresh messages, tool calls, and decisions from server
       const enc = encodeURIComponent(state.selectedUserId);
-      state.messages = await api('GET', '/api/users/' + enc + '/messages?limit=200');
+      const [msgs, tcs, decs] = await Promise.all([
+        api('GET', '/api/users/' + enc + '/messages?limit=200'),
+        api('GET', '/api/users/' + enc + '/tool-calls?limit=200'),
+        api('GET', '/api/users/' + enc + '/decisions?limit=200'),
+      ]);
+      state.messages = msgs;
+      state.msgToolCalls = tcs;
+      state.msgDecisions = decs;
       renderMessages();
-
-      // Append reply details (tool calls, timings) to the last assistant bubble
-      if (reply && (reply.tool_calls?.length > 0 || reply.timings?.total_ms > 0)) {
-        const bubbles = $('#messages-list').querySelectorAll('.msg-bubble.role-assistant');
-        const lastBubble = bubbles[bubbles.length - 1];
-        if (lastBubble) {
-          lastBubble.appendChild(buildReplyDetails(reply));
-        }
-      }
 
       const panel = $('#panel-messages');
       panel.scrollTop = panel.scrollHeight;
