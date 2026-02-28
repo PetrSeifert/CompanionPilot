@@ -704,6 +704,12 @@ fn sanitize_memory_key(raw: &str) -> String {
     normalized.trim_matches('_').to_owned()
 }
 
+const DEFAULT_SYSTEM_PROMPT_BASE: &str = "You are CompanionPilot, a helpful Discord AI companion.\nKeep replies concise and practical.\nNever emit XML/JSON/pseudo tool-call markup in normal replies.";
+
+pub fn default_system_prompt_base() -> &'static str {
+    DEFAULT_SYSTEM_PROMPT_BASE
+}
+
 fn build_system_prompt(
     memory: &crate::types::MemoryContext,
     override_prompt: Option<&str>,
@@ -711,11 +717,7 @@ fn build_system_prompt(
     let mut sections = if let Some(prompt) = override_prompt {
         vec![prompt.to_owned()]
     } else {
-        vec![
-            "You are CompanionPilot, a helpful Discord AI companion.".to_owned(),
-            "Keep replies concise and practical.".to_owned(),
-            "Never emit XML/JSON/pseudo tool-call markup in normal replies.".to_owned(),
-        ]
+        vec![DEFAULT_SYSTEM_PROMPT_BASE.to_owned()]
     };
 
     if let Some(summary) = &memory.summary {

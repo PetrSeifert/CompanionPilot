@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 
 use crate::{
@@ -55,6 +55,11 @@ struct UpsertFactRequest {
     confidence: Option<f32>,
 }
 
+#[derive(Debug, Serialize)]
+struct DefaultSystemPromptResponse {
+    system_prompt: String,
+}
+
 fn default_guild() -> String {
     "local".to_owned()
 }
@@ -77,6 +82,10 @@ pub fn router(state: AppState) -> Router {
         .route("/app", get(dashboard_app))
         .route("/health", get(health))
         .route("/chat", post(chat))
+        .route(
+            "/api/dashboard/default-system-prompt",
+            get(get_dashboard_default_system_prompt),
+        )
         .route("/api/dashboard/users", get(list_users))
         .route("/api/dashboard/users/{user_id}/facts", get(list_user_facts))
         .route(
@@ -130,6 +139,12 @@ async fn dashboard_app() -> Html<&'static str> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn get_dashboard_default_system_prompt() -> Json<DefaultSystemPromptResponse> {
+    Json(DefaultSystemPromptResponse {
+        system_prompt: crate::orchestrator::default_system_prompt_base().to_owned(),
+    })
 }
 
 async fn chat(
@@ -795,9 +810,16 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     }
     textarea:focus { outline: none; border-color: rgba(62,165,255,.5); }
     .system-prompt-wrap { margin-top: 10px; }
+    .system-prompt-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
     .system-prompt-label {
       display: block;
-      margin: 0 0 6px;
+      margin: 0;
       font-size: .78rem;
       color: var(--muted);
       letter-spacing: .02em;
@@ -887,8 +909,11 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
         <div class="composer">
           <textarea id="prompt" placeholder="Send a test message&#x2026; (Ctrl+Enter to send)"></textarea>
           <div class="system-prompt-wrap">
-            <label class="system-prompt-label" for="system-prompt">System Prompt Override (optional)</label>
-            <textarea id="system-prompt" class="system-prompt-input" placeholder="Leave empty to use the default system prompt. Value is saved in your browser."></textarea>
+            <div class="system-prompt-head">
+              <label class="system-prompt-label" for="system-prompt">System Prompt (editable)</label>
+              <button id="system-prompt-default" type="button" class="tiny-btn">Use Default</button>
+            </div>
+            <textarea id="system-prompt" class="system-prompt-input" placeholder="Loading default system prompt..."></textarea>
           </div>
           <div class="composer-actions">
             <div class="composer-buttons">
@@ -954,6 +979,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     const clearChatBtn   = document.getElementById("clear-chat");
     const promptEl       = document.getElementById("prompt");
     const systemPromptEl = document.getElementById("system-prompt");
+    const systemPromptDefaultBtn = document.getElementById("system-prompt-default");
     const sendStatusEl   = document.getElementById("send-status");
     const chatErrorEl    = document.getElementById("chat-error");
     const factErrorEl    = document.getElementById("fact-error");
@@ -973,6 +999,11 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     let isSending      = false;
     let pendingBubbleId = null;
     const SYSTEM_PROMPT_STORAGE_KEY = "companionpilot.dashboard.systemPrompt";
+    let defaultSystemPrompt = [
+      "You are CompanionPilot, a helpful Discord AI companion.",
+      "Keep replies concise and practical.",
+      "Never emit XML/JSON/pseudo tool-call markup in normal replies."
+    ].join("\n");
 
     const fmtDate = (iso) => {
       const date = new Date(iso);
@@ -1020,9 +1051,54 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       sendBtn.disabled = sending;
       promptEl.disabled = sending;
       systemPromptEl.disabled = sending;
+      systemPromptDefaultBtn.disabled = sending;
       sendBtn.textContent = sending ? "Sending..." : "Send";
       sendStatusEl.textContent = sending ? "Waiting for response..." : "Ready";
       sendStatusEl.classList.toggle("sending", sending);
+    }
+
+    function normalizedPrompt(value) {
+      return (value || "").trim();
+    }
+
+    function shouldSendSystemPromptOverride(value) {
+      const candidate = normalizedPrompt(value);
+      if (!candidate) return false;
+      return candidate !== normalizedPrompt(defaultSystemPrompt);
+    }
+
+    function persistSystemPrompt() {
+      try {
+        if (!shouldSendSystemPromptOverride(systemPromptEl.value)) {
+          localStorage.removeItem(SYSTEM_PROMPT_STORAGE_KEY);
+          return;
+        }
+        localStorage.setItem(SYSTEM_PROMPT_STORAGE_KEY, systemPromptEl.value);
+      } catch {}
+    }
+
+    async function initSystemPromptEditor() {
+      let savedPrompt = null;
+      try {
+        savedPrompt = localStorage.getItem(SYSTEM_PROMPT_STORAGE_KEY);
+      } catch {}
+
+      try {
+        const resp = await fetch("/api/dashboard/default-system-prompt");
+        if (resp.ok) {
+          const payload = await resp.json();
+          if (typeof payload.system_prompt === "string" && payload.system_prompt.trim()) {
+            defaultSystemPrompt = payload.system_prompt;
+          }
+        }
+      } catch {}
+
+      if (savedPrompt && normalizedPrompt(savedPrompt)) {
+        systemPromptEl.value = savedPrompt;
+      } else {
+        systemPromptEl.value = defaultSystemPrompt;
+      }
+      persistSystemPrompt();
     }
 
     function addOptimisticUserBubble(text) {
@@ -1225,13 +1301,14 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       addPendingAssistantBubble();
       try {
         const systemPrompt = systemPromptEl.value.trim();
+        const payload = { content };
+        if (shouldSendSystemPromptOverride(systemPrompt)) {
+          payload.system_prompt = systemPrompt;
+        }
         const resp = await fetch(`/api/dashboard/users/${encodeURIComponent(selectedUser)}/chat`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            content,
-            system_prompt: systemPrompt || undefined
-          })
+          body: JSON.stringify(payload)
         });
         await expectOk(resp);
         removeOptimisticUserBubble();
@@ -1396,22 +1473,15 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     clearChatBtn.addEventListener("click", clearConversation);
     clearToolsBtn.addEventListener("click", clearToolCalls);
     clearPlannersBtn.addEventListener("click", clearPlannerDecisions);
-
-    try {
-      const savedSystemPrompt = localStorage.getItem(SYSTEM_PROMPT_STORAGE_KEY);
-      if (savedSystemPrompt) {
-        systemPromptEl.value = savedSystemPrompt;
-      }
-    } catch {}
-
-    systemPromptEl.addEventListener("input", () => {
-      try {
-        localStorage.setItem(SYSTEM_PROMPT_STORAGE_KEY, systemPromptEl.value);
-      } catch {}
+    systemPromptDefaultBtn.addEventListener("click", () => {
+      systemPromptEl.value = defaultSystemPrompt;
+      persistSystemPrompt();
     });
+    systemPromptEl.addEventListener("input", persistSystemPrompt);
 
     (async function bootstrap() {
       await checkHealth();
+      await initSystemPromptEditor();
       await loadUsers();
       await renderSelectedUser();
       setInterval(checkHealth, 30000);
