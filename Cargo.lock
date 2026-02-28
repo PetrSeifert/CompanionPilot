@@ -232,10 +232,22 @@ name = "companionpilot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "companionpilot-core",
+ "dotenvy",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "companionpilot-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "async-trait",
  "axum",
  "chrono",
- "dotenvy",
  "reqwest",
  "serde",
  "serde_json",
@@ -244,7 +256,6 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

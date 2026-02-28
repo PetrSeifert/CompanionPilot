@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use companionpilot::{
+use companionpilot_core::{
     config::AppConfig,
     discord_bot,
     http::{self, AppState},

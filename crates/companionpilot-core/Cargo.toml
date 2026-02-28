@@ -1,0 +1,18 @@
+[package]
+name = "companionpilot-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.95"
+async-trait = "0.1.86"
+axum = { version = "0.8.1", features = ["macros"] }
+chrono = { version = "0.4.39", features = ["serde"] }
+reqwest = { version = "0.12.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
+serenity = { version = "0.12.4", default-features = false, features = ["client", "gateway", "model", "rustls_backend"] }
+sqlx = { version = "0.8.3", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono"] }
+tokio = { version = "1.43.0", features = ["full"] }
+tower-http = { version = "0.6.2", features = ["trace"] }
+tracing = "0.1.41"

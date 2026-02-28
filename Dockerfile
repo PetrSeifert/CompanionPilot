@@ -1,10 +1,9 @@
 FROM rust:1.88-slim AS builder
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock* ./
-COPY src ./src
+COPY . .
 
-RUN cargo build --release
+RUN cargo build --release -p companionpilot
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*

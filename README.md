@@ -2,6 +2,11 @@
 
 CompanionPilot is a Rust-first AI orchestrator for Discord chat with long/short-term memory, tool execution, and Railway-ready deployment.
 
+Workspace layout:
+
+- `apps/companionpilot`: executable app crate
+- `crates/companionpilot-core`: reusable core library crate
+
 ## Implemented v1 baseline
 
 - Discord text event ingestion (`serenity`)
@@ -43,7 +48,7 @@ psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/00
 4. Run the service:
 
 ```bash
-cargo run
+cargo run -p companionpilot
 ```
 
 5. Test health endpoint:
@@ -102,7 +107,7 @@ OpenRouter settings:
 To inspect search behavior in logs, set:
 
 ```bash
-RUST_LOG=companionpilot=debug,info
+RUST_LOG=companionpilot=debug,companionpilot_core=debug,info
 ```
 
 Then look for:
