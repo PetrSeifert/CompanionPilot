@@ -1,8 +1,10 @@
+mod current_datetime;
 mod web_search;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
+pub use current_datetime::CurrentDateTimeTool;
 pub use web_search::TavilyWebSearchTool;
 
 #[derive(Debug, Clone)]
@@ -18,6 +20,7 @@ pub trait ToolExecutor: Send + Sync {
 
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
+    pub current_datetime: CurrentDateTimeTool,
     pub web_search: Option<TavilyWebSearchTool>,
 }
 
@@ -25,6 +28,7 @@ pub struct ToolRegistry {
 impl ToolExecutor for ToolRegistry {
     async fn execute(&self, tool_name: &str, args: Value) -> anyhow::Result<ToolResult> {
         match tool_name {
+            "current_datetime" => self.current_datetime.get_now(args).await,
             "web_search" => {
                 let tool = self
                     .web_search

@@ -813,6 +813,7 @@ If memory should not be stored, set store=false and key/value to empty strings.
 Store only durable personal facts (identity, preferences, recurring goals, corrections).
 Do not store one-off requests or transient states.
 Use web search for latest/current/news/prices/weather or unknown factual claims.
+For time-sensitive requests, call current_datetime before web_search so queries and answers are anchored to real current time.
 Tool inventory:
 {}
 {}",
@@ -837,6 +838,7 @@ Return strict JSON only (no markdown, no prose) with this exact schema:
 If action=final, provide the complete final answer and return an empty tool_calls array.
 If action=tools, final_answer must be empty and tool_calls must contain at least one valid call.
 Only request tools when the current outputs are insufficient or conflicting.
+For time-sensitive requests, prefer calling current_datetime before additional web_search calls.
 Tool inventory:
 {}
 {}",
@@ -875,6 +877,12 @@ fn build_planner_context_block(memory: &crate::types::MemoryContext) -> String {
 fn build_tool_inventory_for_planner() -> &'static str {
     r#"[
   {
+    "tool_name": "current_datetime",
+    "args_schema": {},
+    "when_to_use": "Need the exact current date/time before time-sensitive lookups or answers.",
+    "when_not_to_use": "Question is timeless or explicitly historical."
+  },
+  {
     "tool_name": "web_search",
     "args_schema": {
       "query": "string (required, non-empty)",
@@ -902,6 +910,12 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
             break;
         }
         match planned_call.tool_name.as_str() {
+            "current_datetime" => {
+                sanitized_calls.push(ToolCall {
+                    tool_name: "current_datetime".to_owned(),
+                    args: json!({}),
+                });
+            }
             "web_search" => {
                 let query = planned_call
                     .args
@@ -1543,5 +1557,44 @@ mod tests {
         assert_eq!(sanitized.len(), 6);
         assert_eq!(sanitized[0].tool_name, "web_search");
         assert_eq!(sanitized[5].tool_name, "web_search");
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_allows_current_datetime() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "current_datetime".to_owned(),
+            args: json!({"ignored": true}),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].tool_name, "current_datetime");
+        assert_eq!(sanitized[0].args, json!({}));
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_preserves_datetime_then_search_order() {
+        let planned_calls = vec![
+            PlannedToolCall {
+                tool_name: "current_datetime".to_owned(),
+                args: json!({}),
+            },
+            PlannedToolCall {
+                tool_name: "web_search".to_owned(),
+                args: json!({
+                    "query": "current weather in berlin",
+                    "max_results": 5
+                }),
+            },
+        ];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 2);
+        assert_eq!(sanitized[0].tool_name, "current_datetime");
+        assert_eq!(sanitized[1].tool_name, "web_search");
+        let query = sanitized[1].args["query"]
+            .as_str()
+            .expect("query should be a string");
+        assert_eq!(query, "current weather in berlin");
     }
 }

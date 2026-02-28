@@ -8,7 +8,7 @@ use companionpilot_core::{
     model::{MockModelProvider, ModelProvider, OpenRouterProvider},
     orchestrator::DefaultChatOrchestrator,
     safety::SafetyPolicy,
-    tools::{TavilyWebSearchTool, ToolExecutor, ToolRegistry},
+    tools::{CurrentDateTimeTool, TavilyWebSearchTool, ToolExecutor, ToolRegistry},
 };
 use tokio::net::TcpListener;
 use tracing::{info, warn};
@@ -145,5 +145,8 @@ fn build_tools(config: &AppConfig) -> Arc<dyn ToolExecutor> {
         warn!("TAVILY_API_KEY not set; planner-selected web_search calls will fail");
     }
 
-    Arc::new(ToolRegistry { web_search })
+    Arc::new(ToolRegistry {
+        current_datetime: CurrentDateTimeTool,
+        web_search,
+    })
 }

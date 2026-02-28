@@ -14,6 +14,7 @@ Workspace layout:
 - Model abstraction (`OpenRouterProvider`, `MockModelProvider`)
 - Memory abstraction (`PostgresMemoryStore`, `InMemoryMemoryStore`)
 - Tool runtime with Tavily web search support
+- Built-in `current_datetime` tool for UTC date/time grounding
 - HTTP API for health, chat, and dashboard data (`axum`)
 - Built-in web dashboard at `/app` for users/memory/chats
 - Dashboard now includes tool-call history (query, result/error, source)
@@ -77,6 +78,7 @@ http://localhost:8080/app
 - Set `DISCORD_TOKEN` in `.env`.
 - Mention the bot or DM it.
 - CompanionPilot decides tool usage automatically from a unified planner decision.
+- For time-sensitive requests, planner can call `current_datetime` before `web_search`.
 - Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 - Short-term memory is injected from recent channel turns, even when no long-term fact is stored.
