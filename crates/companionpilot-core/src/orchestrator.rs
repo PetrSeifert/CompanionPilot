@@ -419,7 +419,9 @@ impl DefaultChatOrchestrator {
 
         match parse_unified_plan(&planner_result) {
             Ok(plan) => {
-                let tool_calls = sanitize_planned_tool_calls(plan.tool_calls);
+                let tool_calls = enforce_datetime_planning_boundary(sanitize_planned_tool_calls(
+                    plan.tool_calls,
+                ));
                 let memory = memory_decision_from_plan(plan.memory);
                 let rationale = if plan.rationale.trim().is_empty() {
                     "model_planner".to_owned()
@@ -516,7 +518,9 @@ impl DefaultChatOrchestrator {
                         }
                     }
                     "tools" | "tool_calls" => {
-                        let tool_calls = sanitize_planned_tool_calls(plan.tool_calls);
+                        let tool_calls = enforce_datetime_planning_boundary(
+                            sanitize_planned_tool_calls(plan.tool_calls),
+                        );
                         if tool_calls.is_empty() {
                             return ToolFollowupDecision::Fallback {
                                 reason: "followup_empty_tools",
@@ -814,6 +818,7 @@ Store only durable personal facts (identity, preferences, recurring goals, corre
 Do not store one-off requests or transient states.
 Use web search for latest/current/news/prices/weather or unknown factual claims.
 For time-sensitive requests, call current_datetime before web_search so queries and answers are anchored to real current time.
+If current_datetime is needed, request only current_datetime in this decision and wait for its output before planning web_search.
 Tool inventory:
 {}
 {}",
@@ -839,6 +844,7 @@ If action=final, provide the complete final answer and return an empty tool_call
 If action=tools, final_answer must be empty and tool_calls must contain at least one valid call.
 Only request tools when the current outputs are insufficient or conflicting.
 For time-sensitive requests, prefer calling current_datetime before additional web_search calls.
+If current_datetime is needed, call it alone first, then plan web_search in a later tool round.
 Tool inventory:
 {}
 {}",
@@ -950,6 +956,28 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
     }
 
     sanitized_calls
+}
+
+fn enforce_datetime_planning_boundary(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
+    let has_datetime = tool_calls
+        .iter()
+        .any(|call| call.tool_name == "current_datetime");
+    let has_non_datetime = tool_calls
+        .iter()
+        .any(|call| call.tool_name != "current_datetime");
+    if !has_datetime || !has_non_datetime {
+        return tool_calls;
+    }
+
+    debug!(
+        total_calls = tool_calls.len(),
+        "deferring non-datetime tools to follow-up round because current_datetime was requested"
+    );
+    let datetime_call = tool_calls
+        .into_iter()
+        .find(|call| call.tool_name == "current_datetime")
+        .expect("checked current_datetime presence above");
+    vec![datetime_call]
 }
 
 fn memory_decision_from_plan(plan: PlannedMemory) -> MemoryDecision {
@@ -1223,12 +1251,13 @@ mod tests {
         model::{MockModelProvider, ModelProvider, ModelRequest},
         safety::SafetyPolicy,
         tools::{ToolExecutor, ToolRegistry, ToolResult},
-        types::MessageCtx,
+        types::{MessageCtx, ToolCall},
     };
 
     use super::{
-        DefaultChatOrchestrator, PlannedToolCall, clean_memory_value, parse_unified_plan,
-        sanitize_memory_key, sanitize_planned_tool_calls,
+        DefaultChatOrchestrator, PlannedToolCall, clean_memory_value,
+        enforce_datetime_planning_boundary, parse_unified_plan, sanitize_memory_key,
+        sanitize_planned_tool_calls,
     };
 
     #[derive(Debug, Default)]
@@ -1596,5 +1625,36 @@ mod tests {
             .as_str()
             .expect("query should be a string");
         assert_eq!(query, "current weather in berlin");
+    }
+
+    #[test]
+    fn enforce_datetime_planning_boundary_runs_datetime_in_isolation() {
+        let calls = vec![
+            ToolCall {
+                tool_name: "web_search".to_owned(),
+                args: json!({"query": "major video game releases late 2024 early 2025", "max_results": 10}),
+            },
+            ToolCall {
+                tool_name: "current_datetime".to_owned(),
+                args: json!({}),
+            },
+        ];
+
+        let bounded = enforce_datetime_planning_boundary(calls);
+        assert_eq!(bounded.len(), 1);
+        assert_eq!(bounded[0].tool_name, "current_datetime");
+    }
+
+    #[test]
+    fn enforce_datetime_planning_boundary_keeps_non_datetime_plans_unchanged() {
+        let calls = vec![ToolCall {
+            tool_name: "web_search".to_owned(),
+            args: json!({"query": "rust async traits", "max_results": 3}),
+        }];
+
+        let bounded = enforce_datetime_planning_boundary(calls.clone());
+        assert_eq!(bounded.len(), calls.len());
+        assert_eq!(bounded[0].tool_name, "web_search");
+        assert_eq!(bounded[0].args, calls[0].args);
     }
 }
