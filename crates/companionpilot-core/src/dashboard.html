@@ -542,6 +542,111 @@ body::before {
 #btn-send:hover { background: #e2b44e; }
 #btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* ===== TYPING INDICATOR ===== */
+.typing-indicator {
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 75%;
+}
+
+.typing-dots {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 12px 16px;
+  background: var(--bg-recessed);
+  border: 1px solid var(--border);
+  box-shadow: inset 0 1px 8px rgba(0, 0, 0, 0.3);
+}
+
+.typing-dots span {
+  width: 6px;
+  height: 6px;
+  background: var(--amber);
+  display: inline-block;
+  animation: typingPulse 1.4s infinite ease-in-out both;
+}
+
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typingPulse {
+  0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
+}
+
+.typing-status {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--amber-dim);
+  letter-spacing: 0.5px;
+  padding-left: 4px;
+  animation: statusFade 2s infinite ease-in-out;
+}
+
+@keyframes statusFade {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* ===== REPLY DETAILS (tool calls + decisions inline) ===== */
+.reply-details {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.reply-detail-item {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.reply-detail-item .detail-icon {
+  font-size: 0.6rem;
+  letter-spacing: 1px;
+  padding: 1px 5px;
+  text-transform: uppercase;
+  font-weight: 600;
+  border: 1px solid;
+}
+
+.detail-icon.tool {
+  color: var(--amber);
+  border-color: rgba(212, 165, 67, 0.3);
+  background: rgba(212, 165, 67, 0.06);
+}
+
+.detail-icon.decision {
+  color: var(--teal);
+  border-color: rgba(58, 138, 124, 0.3);
+  background: rgba(58, 138, 124, 0.06);
+}
+
+.reply-timings {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
+/* ===== OPTIMISTIC MESSAGE (pending style) ===== */
+.msg-bubble.sending {
+  opacity: 0.6;
+}
+
+.msg-bubble.sending .msg-meta {
+  color: var(--amber-dim);
+}
+
 /* ===== FACTS TABLE ===== */
 #facts-table-wrapper {
   overflow-x: auto;
@@ -1746,26 +1851,193 @@ pre.json-block {
 
   btnSend.addEventListener('click', sendMessage);
 
+  function appendOptimisticMessage(content) {
+    const list = $('#messages-list');
+    const empty = $('#messages-empty');
+    empty.style.display = 'none';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble role-user sending';
+    bubble.id = 'optimistic-msg';
+
+    const contentEl = document.createElement('div');
+    contentEl.className = 'msg-content';
+    contentEl.textContent = content;
+
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = 'SENDING...';
+
+    bubble.appendChild(contentEl);
+    bubble.appendChild(meta);
+    list.appendChild(bubble);
+
+    const panel = $('#panel-messages');
+    panel.scrollTop = panel.scrollHeight;
+  }
+
+  function showTypingIndicator() {
+    const list = $('#messages-list');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'typing-indicator';
+    wrapper.id = 'typing-indicator';
+
+    const dots = document.createElement('div');
+    dots.className = 'typing-dots';
+    for (let i = 0; i < 3; i++) {
+      dots.appendChild(document.createElement('span'));
+    }
+
+    const status = document.createElement('div');
+    status.className = 'typing-status';
+    status.id = 'typing-status-text';
+    status.textContent = 'PROCESSING TRANSMISSION...';
+
+    wrapper.appendChild(dots);
+    wrapper.appendChild(status);
+    list.appendChild(wrapper);
+
+    const panel = $('#panel-messages');
+    panel.scrollTop = panel.scrollHeight;
+
+    // Cycle through status messages to show activity
+    const phases = [
+      'PROCESSING TRANSMISSION...',
+      'LOADING CONTEXT & MEMORY...',
+      'RUNNING PLANNER ANALYSIS...',
+      'EVALUATING TOOL CALLS...',
+      'GENERATING RESPONSE...',
+    ];
+    let phaseIdx = 0;
+    const interval = setInterval(() => {
+      phaseIdx = (phaseIdx + 1) % phases.length;
+      const el = $('#typing-status-text');
+      if (el) el.textContent = phases[phaseIdx];
+    }, 2200);
+
+    wrapper._interval = interval;
+  }
+
+  function removeTypingIndicator() {
+    const indicator = $('#typing-indicator');
+    if (indicator) {
+      clearInterval(indicator._interval);
+      indicator.remove();
+    }
+  }
+
+  function buildReplyDetails(reply) {
+    // Build detail elements for tool calls and timing from the OrchestratorReply
+    const frag = document.createDocumentFragment();
+
+    if (reply.tool_calls && reply.tool_calls.length > 0) {
+      const details = document.createElement('div');
+      details.className = 'reply-details';
+
+      reply.tool_calls.forEach(tc => {
+        const item = document.createElement('div');
+        item.className = 'reply-detail-item';
+
+        const icon = document.createElement('span');
+        icon.className = 'detail-icon tool';
+        icon.textContent = 'TOOL';
+
+        const label = document.createElement('span');
+        label.textContent = tc.tool_name;
+        if (tc.args) {
+          const argKeys = Object.keys(tc.args);
+          if (argKeys.length > 0) {
+            label.textContent += '(' + argKeys.join(', ') + ')';
+          }
+        }
+
+        item.appendChild(icon);
+        item.appendChild(label);
+        details.appendChild(item);
+      });
+
+      // Show timings summary
+      if (reply.timings && reply.timings.total_ms > 0) {
+        const timingEl = document.createElement('div');
+        timingEl.className = 'reply-timings';
+        const parts = [];
+        if (reply.timings.planner_ms > 0) parts.push('planner ' + reply.timings.planner_ms + 'ms');
+        if (reply.timings.tool_execution_ms > 0) parts.push('tools ' + reply.timings.tool_execution_ms + 'ms');
+        if (reply.timings.final_model_ms > 0) parts.push('model ' + reply.timings.final_model_ms + 'ms');
+        parts.push('total ' + reply.timings.total_ms + 'ms');
+        timingEl.textContent = parts.join(' · ');
+        details.appendChild(timingEl);
+      }
+
+      frag.appendChild(details);
+    } else if (reply.timings && reply.timings.total_ms > 0) {
+      const details = document.createElement('div');
+      details.className = 'reply-details';
+      const timingEl = document.createElement('div');
+      timingEl.className = 'reply-timings';
+      timingEl.textContent = 'total ' + reply.timings.total_ms + 'ms';
+      details.appendChild(timingEl);
+      frag.appendChild(details);
+    }
+
+    return frag;
+  }
+
   async function sendMessage() {
     const content = composerInput.value.trim();
     if (!content || !state.selectedUserId) return;
 
+    // Immediately clear input and show optimistic message
+    composerInput.value = '';
+    composerInput.style.height = 'auto';
     btnSend.disabled = true;
     composerInput.disabled = true;
 
+    appendOptimisticMessage(content);
+    showTypingIndicator();
+
     try {
-      await api('POST', '/chat', {
+      const reply = await api('POST', '/chat', {
         user_id: state.selectedUserId,
         content: content,
       });
-      composerInput.value = '';
-      composerInput.style.height = 'auto';
-      // Refresh messages
+
+      removeTypingIndicator();
+
+      // Remove optimistic message — we'll re-render from server data
+      const optimistic = $('#optimistic-msg');
+      if (optimistic) optimistic.remove();
+
+      // Refresh messages from server to get proper IDs/timestamps
       const enc = encodeURIComponent(state.selectedUserId);
       state.messages = await api('GET', '/api/users/' + enc + '/messages?limit=200');
       renderMessages();
+
+      // Append reply details (tool calls, timings) to the last assistant bubble
+      if (reply && (reply.tool_calls?.length > 0 || reply.timings?.total_ms > 0)) {
+        const bubbles = $('#messages-list').querySelectorAll('.msg-bubble.role-assistant');
+        const lastBubble = bubbles[bubbles.length - 1];
+        if (lastBubble) {
+          lastBubble.appendChild(buildReplyDetails(reply));
+        }
+      }
+
+      const panel = $('#panel-messages');
+      panel.scrollTop = panel.scrollHeight;
     } catch(e) {
-      /* toast already shown */
+      removeTypingIndicator();
+      // Mark optimistic message as failed
+      const optimistic = $('#optimistic-msg');
+      if (optimistic) {
+        optimistic.classList.remove('sending');
+        optimistic.style.borderColor = 'var(--rose)';
+        const meta = optimistic.querySelector('.msg-meta');
+        if (meta) {
+          meta.textContent = 'SEND FAILED';
+          meta.style.color = 'var(--rose)';
+        }
+      }
     } finally {
       composerInput.disabled = false;
       btnSend.disabled = !composerInput.value.trim();
