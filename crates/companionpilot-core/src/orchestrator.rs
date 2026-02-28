@@ -99,6 +99,18 @@ impl DefaultChatOrchestrator {
     }
 
     pub async fn handle_message(&self, ctx: MessageCtx) -> anyhow::Result<OrchestratorReply> {
+        self.handle_message_with_system_prompt_override(ctx, None)
+            .await
+    }
+
+    pub async fn handle_message_with_system_prompt_override(
+        &self,
+        ctx: MessageCtx,
+        system_prompt_override: Option<String>,
+    ) -> anyhow::Result<OrchestratorReply> {
+        let system_prompt_override = system_prompt_override
+            .map(|prompt| prompt.trim().to_owned())
+            .filter(|prompt| !prompt.is_empty());
         let safety_flags = self.safety.validate_user_message(&ctx.content);
         let memory_context = self
             .memory
@@ -222,16 +234,24 @@ impl DefaultChatOrchestrator {
         let reply_text = if tool_outputs.is_empty() {
             self.model
                 .complete(ModelRequest {
-                    system_prompt: build_system_prompt(&memory_context),
+                    system_prompt: build_system_prompt(
+                        &memory_context,
+                        system_prompt_override.as_deref(),
+                    ),
                     user_prompt: ctx.content.clone(),
                 })
                 .await?
         } else {
             let tool_output_block = format_tool_outputs(&tool_outputs);
+            let custom_prompt_header = system_prompt_override
+                .as_deref()
+                .map(|prompt| format!("Custom system prompt override:\n{prompt}\n\n"))
+                .unwrap_or_default();
             self.model
                 .complete(ModelRequest {
                     system_prompt: format!(
-                        "You are CompanionPilot. Use the provided tool outputs to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
+                        "{}You are CompanionPilot. Use the provided tool outputs to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
+                        custom_prompt_header,
                         build_recent_context_block(&memory_context.recent_messages)
                     ),
                     user_prompt: format!(
@@ -684,12 +704,19 @@ fn sanitize_memory_key(raw: &str) -> String {
     normalized.trim_matches('_').to_owned()
 }
 
-fn build_system_prompt(memory: &crate::types::MemoryContext) -> String {
-    let mut sections = vec![
-        "You are CompanionPilot, a helpful Discord AI companion.".to_owned(),
-        "Keep replies concise and practical.".to_owned(),
-        "Never emit XML/JSON/pseudo tool-call markup in normal replies.".to_owned(),
-    ];
+fn build_system_prompt(
+    memory: &crate::types::MemoryContext,
+    override_prompt: Option<&str>,
+) -> String {
+    let mut sections = if let Some(prompt) = override_prompt {
+        vec![prompt.to_owned()]
+    } else {
+        vec![
+            "You are CompanionPilot, a helpful Discord AI companion.".to_owned(),
+            "Keep replies concise and practical.".to_owned(),
+            "Never emit XML/JSON/pseudo tool-call markup in normal replies.".to_owned(),
+        ]
+    };
 
     if let Some(summary) = &memory.summary {
         sections.push(format!("Conversation summary: {summary}"));
