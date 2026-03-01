@@ -37,7 +37,16 @@ impl ModelProvider for MockModelProvider {
             };
 
             let mut tool_calls = Vec::new();
-            if let Some(query) = extract_search_query(&request.user_prompt) {
+            if let Some(query) = extract_spotify_search_query(&request.user_prompt) {
+                tool_calls.push(json!({
+                    "tool_name": "spotify_search",
+                    "args": {
+                        "q": query,
+                        "type": "track,artist",
+                        "limit": 5
+                    }
+                }));
+            } else if let Some(query) = extract_search_query(&request.user_prompt) {
                 tool_calls.push(json!({
                     "tool_name": "web_search",
                     "args": {
@@ -110,6 +119,29 @@ fn extract_search_query(input: &str) -> Option<String> {
         input[index + "search the web for ".len()..].trim()
     } else if let Some(index) = lowered.find("look up ") {
         input[index + "look up ".len()..].trim()
+    } else {
+        return None;
+    };
+
+    let query = query
+        .trim_matches(|character: char| !character.is_alphanumeric() && !character.is_whitespace())
+        .trim();
+    if query.is_empty() {
+        None
+    } else {
+        Some(query.to_owned())
+    }
+}
+
+fn extract_spotify_search_query(input: &str) -> Option<String> {
+    let lowered = input.to_lowercase();
+
+    let query = if let Some(index) = lowered.find("search spotify for ") {
+        input[index + "search spotify for ".len()..].trim()
+    } else if let Some(index) = lowered.find("spotify search for ") {
+        input[index + "spotify search for ".len()..].trim()
+    } else if let Some(index) = lowered.find("find on spotify ") {
+        input[index + "find on spotify ".len()..].trim()
     } else {
         return None;
     };

@@ -10,7 +10,7 @@ use companionpilot_core::{
     safety::SafetyPolicy,
     tools::{
         CurrentDateTimeTool, SpotifyControlPlaybackTool, SpotifyPlayingStatusTool,
-        SpotifyUsersListTool, TavilyWebSearchTool, ToolExecutor, ToolRegistry,
+        SpotifySearchTool, SpotifyUsersListTool, TavilyWebSearchTool, ToolExecutor, ToolRegistry,
     },
     voice::{VoiceManager, VoiceRuntimeConfig},
 };
@@ -154,6 +154,7 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
     let spotify_control_playback = config.spotify_admin_token.as_ref().map(|token| {
         SpotifyControlPlaybackTool::new(config.spotify_control_api_base_url.clone(), token.clone())
     });
+    let spotify_search = SpotifySearchTool::new(config.spotify_search_api_url.clone());
     let spotify_users_list = SpotifyUsersListTool::new(
         config.spotify_users_api_url.clone(),
         config.spotify_admin_token.clone(),
@@ -172,6 +173,7 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
         current_datetime: CurrentDateTimeTool,
         spotify_control_playback,
         spotify_playing_status: SpotifyPlayingStatusTool::default(),
+        spotify_search,
         spotify_users_list,
         web_search,
         voice,

@@ -17,6 +17,7 @@ Workspace layout:
 - Built-in `current_datetime` tool for UTC date/time grounding
 - Built-in `spotify_playing_status` tool for current Spotify playback
 - Built-in `spotify_control_playback` tool for remote Spotify playback control
+- Built-in `spotify_search` tool for Spotify catalog search via PeterRock API
 - Built-in `spotify_users_list` tool for tracked Spotify user discovery
 - HTTP API for health and chat (`axum`)
 - Reply timing telemetry (planner/tools/model/memory stage durations)
@@ -75,6 +76,7 @@ curl -X POST http://localhost:8080/chat \
 - For time-sensitive requests, planner can call `current_datetime` before `web_search`.
 - For Spotify playback requests, planner can call `spotify_playing_status`.
 - For Spotify playback control requests, planner can call `spotify_control_playback` with `user_id` + action-specific args.
+- For Spotify catalog lookup requests, planner can call `spotify_search` with `q` + `type` and optional Spotify Search API filters.
 - For Spotify playback control discovery, planner can call `spotify_users_list` to retrieve available `user_id` values.
 - Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
@@ -103,6 +105,7 @@ OpenRouter settings:
 - If `DATABASE_URL` is missing, memory uses in-process storage.
 - If `TAVILY_API_KEY` is missing, planner-selected `web_search` calls return a configuration error.
 - If `SPOTIFY_ADMIN_TOKEN` is missing, planner-selected `spotify_control_playback` calls return a configuration error.
+- `spotify_search` calls `GET /api/spotify/search` without admin auth by default.
 - `spotify_users_list` calls `GET /api/spotify/users` without auth by default.
 - HTTP endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
 
@@ -119,6 +122,7 @@ Then look for:
 - `tool call selected by unified planner` (tool + args selected)
 - `tool call completed` (tool finished)
 - `tavily web search start` / `tavily web search success` (actual Tavily call path)
+- `spotify search request start` (actual Spotify search call path)
 - `planner fallback: running without tools and without memory write` (planner failure fallback)
 - `reply completed` (per-message timing summary)
 - `slow reply detected` / `slow Discord reply detected` (slow-path warnings, threshold 30s)

@@ -1,6 +1,7 @@
 mod current_datetime;
 mod spotify_control_playback;
 mod spotify_playing_status;
+mod spotify_search;
 mod spotify_users_list;
 mod web_search;
 
@@ -14,6 +15,7 @@ use crate::{types::MessageCtx, voice::VoiceManager};
 pub use current_datetime::CurrentDateTimeTool;
 pub use spotify_control_playback::{DEFAULT_SPOTIFY_CONTROL_BASE_URL, SpotifyControlPlaybackTool};
 pub use spotify_playing_status::SpotifyPlayingStatusTool;
+pub use spotify_search::{DEFAULT_SPOTIFY_SEARCH_API_URL, SpotifySearchTool};
 pub use spotify_users_list::{DEFAULT_SPOTIFY_USERS_API_URL, SpotifyUsersListTool};
 pub use web_search::TavilyWebSearchTool;
 
@@ -38,6 +40,7 @@ pub struct ToolRegistry {
     pub current_datetime: CurrentDateTimeTool,
     pub spotify_control_playback: Option<SpotifyControlPlaybackTool>,
     pub spotify_playing_status: SpotifyPlayingStatusTool,
+    pub spotify_search: SpotifySearchTool,
     pub spotify_users_list: SpotifyUsersListTool,
     pub web_search: Option<TavilyWebSearchTool>,
     pub voice: Option<Arc<VoiceManager>>,
@@ -60,6 +63,7 @@ impl ToolExecutor for ToolRegistry {
                 tool.control_playback(args).await
             }
             "spotify_playing_status" => self.spotify_playing_status.get_playing_status(args).await,
+            "spotify_search" => self.spotify_search.search(args).await,
             "spotify_users_list" => self.spotify_users_list.list_users(args).await,
             "web_search" => {
                 let tool = self

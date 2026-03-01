@@ -859,6 +859,7 @@ If memory should not be stored, set store=false and key/value to empty strings.
 Store only durable personal facts (identity, preferences, recurring goals, corrections).
 Do not store one-off requests or transient states.
 Use web search for latest/current/news/prices/weather or unknown factual claims.
+Prefer spotify_search for Spotify catalog lookup requests (tracks, artists, albums, playlists).
 For time-sensitive requests, call current_datetime before web_search so queries and answers are anchored to real current time.
 If current_datetime is needed, request only current_datetime in this decision and wait for its output before planning web_search.
 Tool inventory:
@@ -886,6 +887,7 @@ If action=final, provide the complete final answer and return an empty tool_call
 If action=tools, final_answer must be empty and tool_calls must contain at least one valid call.
 Only request tools when the current outputs are insufficient or conflicting.
 For time-sensitive requests, prefer calling current_datetime before additional web_search calls.
+Prefer spotify_search for Spotify catalog lookup requests (tracks, artists, albums, playlists).
 If current_datetime is needed, call it alone first, then plan web_search in a later tool round.
 Tool inventory:
 {}
@@ -959,6 +961,19 @@ fn build_tool_inventory_for_planner() -> &'static str {
     "args_schema": {},
     "when_to_use": "Need the list of tracked Spotify users to discover valid user_id values before playback control.",
     "when_not_to_use": "A valid Spotify user_id is already known or Spotify is unrelated to the request."
+  },
+  {
+    "tool_name": "spotify_search",
+    "args_schema": {
+      "q": "string (required, non-empty search query)",
+      "type": "string or array<string> (required, supported: track|artist|album|playlist|show|episode|audiobook)",
+      "limit": "integer 1-50 (optional, default from API)",
+      "offset": "integer 0-1000 (optional, default 0)",
+      "market": "string ISO-3166-1 alpha-2 country code (optional)",
+      "include_external": "string (optional, forwarded as-is)"
+    },
+    "when_to_use": "Need Spotify-native catalog results instead of general web search.",
+    "when_not_to_use": "Request is not about finding Spotify catalog items."
   },
   {
     "tool_name": "web_search",
@@ -1039,6 +1054,16 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
                     tool_name: "spotify_users_list".to_owned(),
                     args: json!({}),
                 });
+            }
+            "spotify_search" => {
+                if let Some(args) = sanitize_spotify_search_args(&planned_call.args) {
+                    sanitized_calls.push(ToolCall {
+                        tool_name: "spotify_search".to_owned(),
+                        args,
+                    });
+                } else {
+                    debug!("dropping planner spotify_search call with invalid args");
+                }
             }
             "web_search" => {
                 let query = planned_call
@@ -1210,6 +1235,90 @@ fn sanitize_spotify_control_playback_args(raw_args: &Value) -> Option<Value> {
     Some(Value::Object(args))
 }
 
+fn sanitize_spotify_search_args(raw_args: &Value) -> Option<Value> {
+    let query = raw_args
+        .get("q")
+        .or_else(|| raw_args.get("query"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let type_csv = sanitize_spotify_search_types(raw_args.get("type"))?;
+
+    let mut args = Map::new();
+    args.insert("q".to_owned(), Value::String(query.to_owned()));
+    args.insert("type".to_owned(), Value::String(type_csv));
+
+    if let Some(limit) = raw_args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.clamp(1, 50))
+    {
+        args.insert("limit".to_owned(), json!(limit));
+    }
+
+    if let Some(offset) = raw_args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .map(|value| value.clamp(0, 1000))
+    {
+        args.insert("offset".to_owned(), json!(offset));
+    }
+
+    if let Some(market) = raw_args
+        .get("market")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| is_valid_market_code(value))
+        .map(|value| value.to_ascii_uppercase())
+    {
+        args.insert("market".to_owned(), Value::String(market));
+    }
+
+    if let Some(include_external) = raw_args
+        .get("include_external")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        args.insert(
+            "include_external".to_owned(),
+            Value::String(include_external.to_owned()),
+        );
+    }
+
+    Some(Value::Object(args))
+}
+
+fn sanitize_spotify_search_types(value: Option<&Value>) -> Option<String> {
+    let mut normalized = Vec::new();
+    let raw_values = match value? {
+        Value::String(value) => value.split(',').map(str::to_owned).collect::<Vec<_>>(),
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        _ => return None,
+    };
+
+    for raw in raw_values {
+        let value = raw.trim().to_ascii_lowercase();
+        if value.is_empty()
+            || !is_supported_spotify_search_type(&value)
+            || normalized.contains(&value)
+        {
+            continue;
+        }
+        normalized.push(value);
+    }
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.join(","))
+    }
+}
+
 fn sanitize_string_array(value: Option<&Value>) -> Option<Vec<String>> {
     let array = value?.as_array()?;
     let sanitized = array
@@ -1224,6 +1333,20 @@ fn sanitize_string_array(value: Option<&Value>) -> Option<Vec<String>> {
     } else {
         Some(sanitized)
     }
+}
+
+fn is_supported_spotify_search_type(value: &str) -> bool {
+    matches!(
+        value,
+        "album" | "artist" | "playlist" | "track" | "show" | "episode" | "audiobook"
+    )
+}
+
+fn is_valid_market_code(value: &str) -> bool {
+    value.len() == 2
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
 }
 
 fn is_supported_spotify_control_action(action: &str) -> bool {
@@ -1963,6 +2086,45 @@ mod tests {
         assert_eq!(sanitized.len(), 1);
         assert_eq!(sanitized[0].tool_name, "spotify_users_list");
         assert_eq!(sanitized[0].args, json!({}));
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_allows_spotify_search() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "spotify_search".to_owned(),
+            args: json!({
+                "q": "  daft punk  ",
+                "type": "track, artist,invalid,track",
+                "limit": 99,
+                "offset": 2001,
+                "market": " us ",
+                "include_external": " audio "
+            }),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].tool_name, "spotify_search");
+        assert_eq!(sanitized[0].args["q"], "daft punk");
+        assert_eq!(sanitized[0].args["type"], "track,artist");
+        assert_eq!(sanitized[0].args["limit"], 50);
+        assert_eq!(sanitized[0].args["offset"], 1000);
+        assert_eq!(sanitized[0].args["market"], "US");
+        assert_eq!(sanitized[0].args["include_external"], "audio");
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_drops_spotify_search_without_required_args() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "spotify_search".to_owned(),
+            args: json!({
+                "q": "",
+                "type": "invalid"
+            }),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert!(sanitized.is_empty());
     }
 
     #[test]
