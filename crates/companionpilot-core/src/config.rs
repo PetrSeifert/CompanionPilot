@@ -13,6 +13,9 @@ pub struct AppConfig {
     pub openai_stt_model: String,
     pub openai_tts_model: String,
     pub openai_tts_voice: String,
+    pub spotify_control_api_base_url: String,
+    pub spotify_users_api_url: String,
+    pub spotify_admin_token: Option<String>,
     pub tavily_api_key: Option<String>,
     pub database_url: Option<String>,
     pub redis_url: Option<String>,
@@ -45,6 +48,11 @@ impl AppConfig {
             openai_tts_model: env::var("OPENAI_TTS_MODEL")
                 .unwrap_or_else(|_| "gpt-4o-mini-tts".to_owned()),
             openai_tts_voice: env::var("OPENAI_TTS_VOICE").unwrap_or_else(|_| "alloy".to_owned()),
+            spotify_control_api_base_url: env::var("SPOTIFY_CONTROL_API_BASE_URL")
+                .unwrap_or_else(|_| crate::tools::DEFAULT_SPOTIFY_CONTROL_BASE_URL.to_owned()),
+            spotify_users_api_url: env::var("SPOTIFY_USERS_API_URL")
+                .unwrap_or_else(|_| crate::tools::DEFAULT_SPOTIFY_USERS_API_URL.to_owned()),
+            spotify_admin_token: env::var("SPOTIFY_ADMIN_TOKEN").ok(),
             tavily_api_key: env::var("TAVILY_API_KEY").ok(),
             database_url: env::var("DATABASE_URL").ok(),
             redis_url: env::var("REDIS_URL").ok(),

@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -937,6 +937,30 @@ fn build_tool_inventory_for_planner() -> &'static str {
     "when_not_to_use": "Question is unrelated to Spotify playback."
   },
   {
+    "tool_name": "spotify_control_playback",
+    "args_schema": {
+      "user_id": "string (required, Spotify user id)",
+      "action": "string (required, one of play|pause|toggle|next|previous|shuffle|repeat|seek|volume|playback|queue|transfer)",
+      "device_id": "string (optional)",
+      "state": "boolean for shuffle OR string off|track|context for repeat (optional)",
+      "position_ms": "integer >= 0 (required for seek, optional for playback)",
+      "volume": "integer 0-100 (required for volume)",
+      "uris": "array<string> (optional for playback)",
+      "context_uri": "string (optional for playback)",
+      "uri": "string (required for queue)",
+      "device_ids": "array<string> (required for transfer)",
+      "play": "boolean (optional for transfer)"
+    },
+    "when_to_use": "Need to control Spotify playback for a specific Spotify user account.",
+    "when_not_to_use": "Only reading playback status or request is unrelated to Spotify playback control."
+  },
+  {
+    "tool_name": "spotify_users_list",
+    "args_schema": {},
+    "when_to_use": "Need the list of tracked Spotify users to discover valid user_id values before playback control.",
+    "when_not_to_use": "A valid Spotify user_id is already known or Spotify is unrelated to the request."
+  },
+  {
     "tool_name": "web_search",
     "args_schema": {
       "query": "string (required, non-empty)",
@@ -997,6 +1021,22 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
             "spotify_playing_status" => {
                 sanitized_calls.push(ToolCall {
                     tool_name: "spotify_playing_status".to_owned(),
+                    args: json!({}),
+                });
+            }
+            "spotify_control_playback" => {
+                if let Some(args) = sanitize_spotify_control_playback_args(&planned_call.args) {
+                    sanitized_calls.push(ToolCall {
+                        tool_name: "spotify_control_playback".to_owned(),
+                        args,
+                    });
+                } else {
+                    debug!("dropping planner spotify_control_playback call with invalid args");
+                }
+            }
+            "spotify_users_list" => {
+                sanitized_calls.push(ToolCall {
+                    tool_name: "spotify_users_list".to_owned(),
                     args: json!({}),
                 });
             }
@@ -1085,6 +1125,123 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
     }
 
     sanitized_calls
+}
+
+fn sanitize_spotify_control_playback_args(raw_args: &Value) -> Option<Value> {
+    let user_id = raw_args
+        .get("user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let action = raw_args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| is_supported_spotify_control_action(value))?;
+
+    let mut args = Map::new();
+    args.insert("user_id".to_owned(), Value::String(user_id.to_owned()));
+    args.insert("action".to_owned(), Value::String(action));
+
+    if let Some(device_id) = raw_args
+        .get("device_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        args.insert("device_id".to_owned(), Value::String(device_id.to_owned()));
+    }
+
+    if let Some(state) = raw_args.get("state") {
+        match state {
+            Value::Bool(value) => {
+                args.insert("state".to_owned(), Value::Bool(*value));
+            }
+            Value::String(value) => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    args.insert("state".to_owned(), Value::String(trimmed.to_owned()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(position_ms) = raw_args.get("position_ms").and_then(Value::as_u64) {
+        args.insert("position_ms".to_owned(), json!(position_ms));
+    }
+    if let Some(volume) = raw_args.get("volume").and_then(Value::as_u64) {
+        args.insert("volume".to_owned(), json!(volume));
+    }
+
+    if let Some(uris) = sanitize_string_array(raw_args.get("uris")) {
+        args.insert("uris".to_owned(), json!(uris));
+    }
+
+    if let Some(context_uri) = raw_args
+        .get("context_uri")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        args.insert(
+            "context_uri".to_owned(),
+            Value::String(context_uri.to_owned()),
+        );
+    }
+
+    if let Some(uri) = raw_args
+        .get("uri")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        args.insert("uri".to_owned(), Value::String(uri.to_owned()));
+    }
+
+    if let Some(device_ids) = sanitize_string_array(raw_args.get("device_ids")) {
+        args.insert("device_ids".to_owned(), json!(device_ids));
+    }
+
+    if let Some(play) = raw_args.get("play").and_then(Value::as_bool) {
+        args.insert("play".to_owned(), Value::Bool(play));
+    }
+
+    Some(Value::Object(args))
+}
+
+fn sanitize_string_array(value: Option<&Value>) -> Option<Vec<String>> {
+    let array = value?.as_array()?;
+    let sanitized = array
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn is_supported_spotify_control_action(action: &str) -> bool {
+    matches!(
+        action,
+        "play"
+            | "pause"
+            | "toggle"
+            | "next"
+            | "previous"
+            | "shuffle"
+            | "repeat"
+            | "seek"
+            | "volume"
+            | "playback"
+            | "queue"
+            | "transfer"
+    )
 }
 
 fn enforce_datetime_planning_boundary(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
@@ -1771,6 +1928,40 @@ mod tests {
         let sanitized = sanitize_planned_tool_calls(planned_calls);
         assert_eq!(sanitized.len(), 1);
         assert_eq!(sanitized[0].tool_name, "spotify_playing_status");
+        assert_eq!(sanitized[0].args, json!({}));
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_allows_spotify_control_playback() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "spotify_control_playback".to_owned(),
+            args: json!({
+                "user_id": "alice123",
+                "action": "NEXT",
+                "device_id": "dev-1",
+                "ignored_field": "x"
+            }),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].tool_name, "spotify_control_playback");
+        assert_eq!(sanitized[0].args["user_id"], "alice123");
+        assert_eq!(sanitized[0].args["action"], "next");
+        assert_eq!(sanitized[0].args["device_id"], "dev-1");
+        assert!(sanitized[0].args.get("ignored_field").is_none());
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_allows_spotify_users_list() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "spotify_users_list".to_owned(),
+            args: json!({"ignored": true}),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].tool_name, "spotify_users_list");
         assert_eq!(sanitized[0].args, json!({}));
     }
 

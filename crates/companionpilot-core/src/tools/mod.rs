@@ -1,5 +1,7 @@
 mod current_datetime;
+mod spotify_control_playback;
 mod spotify_playing_status;
+mod spotify_users_list;
 mod web_search;
 
 use std::sync::Arc;
@@ -10,7 +12,9 @@ use serde_json::Value;
 use crate::{types::MessageCtx, voice::VoiceManager};
 
 pub use current_datetime::CurrentDateTimeTool;
+pub use spotify_control_playback::{DEFAULT_SPOTIFY_CONTROL_BASE_URL, SpotifyControlPlaybackTool};
 pub use spotify_playing_status::SpotifyPlayingStatusTool;
+pub use spotify_users_list::{DEFAULT_SPOTIFY_USERS_API_URL, SpotifyUsersListTool};
 pub use web_search::TavilyWebSearchTool;
 
 #[derive(Debug, Clone)]
@@ -32,7 +36,9 @@ pub trait ToolExecutor: Send + Sync {
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
     pub current_datetime: CurrentDateTimeTool,
+    pub spotify_control_playback: Option<SpotifyControlPlaybackTool>,
     pub spotify_playing_status: SpotifyPlayingStatusTool,
+    pub spotify_users_list: Option<SpotifyUsersListTool>,
     pub web_search: Option<TavilyWebSearchTool>,
     pub voice: Option<Arc<VoiceManager>>,
 }
@@ -47,7 +53,20 @@ impl ToolExecutor for ToolRegistry {
     ) -> anyhow::Result<ToolResult> {
         match tool_name {
             "current_datetime" => self.current_datetime.get_now(args).await,
+            "spotify_control_playback" => {
+                let tool = self.spotify_control_playback.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("spotify_control_playback tool is not configured")
+                })?;
+                tool.control_playback(args).await
+            }
             "spotify_playing_status" => self.spotify_playing_status.get_playing_status(args).await,
+            "spotify_users_list" => {
+                let tool = self
+                    .spotify_users_list
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("spotify_users_list tool is not configured"))?;
+                tool.list_users(args).await
+            }
             "web_search" => {
                 let tool = self
                     .web_search

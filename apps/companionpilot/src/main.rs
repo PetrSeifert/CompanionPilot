@@ -9,8 +9,8 @@ use companionpilot_core::{
     orchestrator::DefaultChatOrchestrator,
     safety::SafetyPolicy,
     tools::{
-        CurrentDateTimeTool, SpotifyPlayingStatusTool, TavilyWebSearchTool, ToolExecutor,
-        ToolRegistry,
+        CurrentDateTimeTool, SpotifyControlPlaybackTool, SpotifyPlayingStatusTool,
+        SpotifyUsersListTool, TavilyWebSearchTool, ToolExecutor, ToolRegistry,
     },
     voice::{VoiceManager, VoiceRuntimeConfig},
 };
@@ -151,14 +151,30 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
         .tavily_api_key
         .as_ref()
         .map(|key| TavilyWebSearchTool::new(key.clone()));
+    let spotify_control_playback = config.spotify_admin_token.as_ref().map(|token| {
+        SpotifyControlPlaybackTool::new(config.spotify_control_api_base_url.clone(), token.clone())
+    });
+    let spotify_users_list = config.spotify_admin_token.as_ref().map(|token| {
+        SpotifyUsersListTool::new(config.spotify_users_api_url.clone(), token.clone())
+    });
 
     if web_search.is_none() {
         warn!("TAVILY_API_KEY not set; planner-selected web_search calls will fail");
     }
+    if spotify_control_playback.is_none() {
+        warn!(
+            "SPOTIFY_ADMIN_TOKEN not set; planner-selected spotify_control_playback calls will fail"
+        );
+    }
+    if spotify_users_list.is_none() {
+        warn!("SPOTIFY_ADMIN_TOKEN not set; planner-selected spotify_users_list calls will fail");
+    }
 
     Arc::new(ToolRegistry {
         current_datetime: CurrentDateTimeTool,
+        spotify_control_playback,
         spotify_playing_status: SpotifyPlayingStatusTool::default(),
+        spotify_users_list,
         web_search,
         voice,
     })
