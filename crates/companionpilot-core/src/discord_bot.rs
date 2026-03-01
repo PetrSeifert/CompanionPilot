@@ -3,7 +3,12 @@ use std::sync::Arc;
 use chrono::Utc;
 use serenity::{
     async_trait,
-    model::{channel::Message, gateway::GatewayIntents, prelude::VoiceState},
+    model::{
+        channel::Message,
+        gateway::{GatewayIntents, Ready},
+        id::GuildId,
+        prelude::VoiceState,
+    },
     prelude::*,
 };
 use songbird::{SerenityInit, Songbird};
@@ -16,8 +21,49 @@ struct Handler {
     voice: Option<Arc<VoiceManager>>,
 }
 
+impl Handler {
+    async fn seed_voice_states_from_cache(&self, ctx: &Context, guilds: &[GuildId]) {
+        let Some(voice) = &self.voice else {
+            return;
+        };
+
+        let mut cached_states = Vec::new();
+        for guild_id in guilds {
+            let Some(guild) = ctx.cache.guild(*guild_id) else {
+                continue;
+            };
+
+            for (user_id, state) in &guild.voice_states {
+                cached_states.push((
+                    guild_id.get(),
+                    user_id.get(),
+                    state.channel_id.map(|id| id.get()),
+                ));
+            }
+        }
+
+        for (guild_id, user_id, channel_id) in cached_states {
+            voice
+                .update_user_voice_state(guild_id, user_id, channel_id)
+                .await;
+        }
+    }
+}
+
 #[async_trait]
 impl EventHandler for Handler {
+    async fn ready(&self, _ctx: Context, ready: Ready) {
+        info!(user = %ready.user.name, "Discord gateway ready");
+    }
+
+    async fn cache_ready(&self, ctx: Context, guilds: Vec<GuildId>) {
+        self.seed_voice_states_from_cache(&ctx, &guilds).await;
+        info!(
+            guild_count = guilds.len(),
+            "seeded cached voice states during startup"
+        );
+    }
+
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.bot {
             return;
