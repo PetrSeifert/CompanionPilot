@@ -1434,7 +1434,17 @@ fn memory_payload(memory: &MemoryDecision) -> Value {
 fn truncate_for_log(input: &str, max_len: usize) -> String {
     let mut result = input.replace('\n', "\\n");
     if result.len() > max_len {
-        result.truncate(max_len);
+        let safe_len = if result.is_char_boundary(max_len) {
+            max_len
+        } else {
+            result
+                .char_indices()
+                .map(|(index, _)| index)
+                .take_while(|index| *index < max_len)
+                .last()
+                .unwrap_or(0)
+        };
+        result.truncate(safe_len);
         result.push_str("...");
     }
     result
@@ -1666,7 +1676,7 @@ mod tests {
     use super::{
         DefaultChatOrchestrator, PlannedToolCall, clean_memory_value,
         enforce_datetime_planning_boundary, parse_unified_plan, sanitize_memory_key,
-        sanitize_planned_tool_calls,
+        sanitize_planned_tool_calls, truncate_for_log,
     };
 
     #[derive(Debug, Default)]
@@ -1968,6 +1978,12 @@ mod tests {
     #[test]
     fn clean_memory_value_trims_wrappers() {
         assert_eq!(clean_memory_value("\"Petr.\""), "Petr");
+    }
+
+    #[test]
+    fn truncate_for_log_preserves_utf8_boundaries() {
+        let output = truncate_for_log("hello🎵world", 7);
+        assert_eq!(output, "hello...");
     }
 
     #[test]
