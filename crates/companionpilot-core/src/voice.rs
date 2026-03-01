@@ -18,6 +18,7 @@ use songbird::{
     Config as SongbirdConfig, Songbird,
     driver::DecodeMode,
     events::{CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler},
+    tracks::PlayMode,
 };
 use tokio::sync::{Mutex, Notify, RwLock};
 use tracing::{info, warn};
@@ -466,7 +467,7 @@ impl VoiceManager {
         let reply_for_tts = clamp_tts_input(&reply_text);
         let tts_audio = self
             .openai
-            .synthesize_wav(&reply_for_tts)
+            .synthesize_mp3(&reply_for_tts)
             .await
             .context("TTS synthesis failed")?;
         self.play_tts_audio(guild_id, tts_audio).await?;
@@ -478,13 +479,47 @@ impl VoiceManager {
         ))
     }
 
-    async fn play_tts_audio(&self, guild_id: u64, wav_audio: Vec<u8>) -> anyhow::Result<()> {
+    async fn play_tts_audio(&self, guild_id: u64, audio_bytes: Vec<u8>) -> anyhow::Result<()> {
+        if audio_bytes.len() < 64 {
+            anyhow::bail!(
+                "TTS response was unexpectedly small ({} bytes)",
+                audio_bytes.len()
+            );
+        }
+
+        let audio_magic = audio_magic(&audio_bytes);
         let songbird = self.songbird().await?;
         let handler_lock = songbird
             .get(GuildId::new(guild_id))
             .context("bot is no longer connected to voice")?;
         let mut handler = handler_lock.lock().await;
-        let _track = handler.play_input(wav_audio.into());
+        let track = handler.play_input(audio_bytes.into());
+
+        // Give Songbird a short window to parse/decode and report any immediate track error.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let state = track
+            .get_info()
+            .await
+            .context("unable to query Songbird track state after enqueue")?;
+        match state.playing {
+            PlayMode::Errored(error) => {
+                anyhow::bail!("Songbird playback error: {error:?} (audio_magic={audio_magic})")
+            }
+            PlayMode::End => {
+                warn!(
+                    guild_id,
+                    audio_magic = %audio_magic,
+                    "tts track ended very quickly; check audio format and Discord permissions"
+                );
+            }
+            _ => {}
+        }
+
+        info!(
+            guild_id,
+            audio_magic = %audio_magic,
+            "tts track enqueued for voice playback"
+        );
         Ok(())
     }
 
@@ -612,12 +647,12 @@ impl OpenAiAudioClient {
         Ok(response.text)
     }
 
-    async fn synthesize_wav(&self, text: &str) -> anyhow::Result<Vec<u8>> {
+    async fn synthesize_mp3(&self, text: &str) -> anyhow::Result<Vec<u8>> {
         let payload = serde_json::json!({
             "model": self.tts_model,
             "voice": self.tts_voice,
             "input": text,
-            "response_format": "wav"
+            "response_format": "mp3"
         });
 
         let response = self
@@ -647,6 +682,25 @@ fn truncate_for_tool_result(input: &str, max_chars: usize) -> String {
         return compact;
     }
     compact.chars().take(max_chars).collect::<String>() + "..."
+}
+
+fn audio_magic(bytes: &[u8]) -> String {
+    if bytes.len() >= 4 && &bytes[0..4] == b"RIFF" {
+        return "wav".to_owned();
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"ID3" {
+        return "mp3-id3".to_owned();
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 {
+        return "mp3-frame".to_owned();
+    }
+    let preview = bytes
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join("");
+    format!("unknown:{preview}")
 }
 
 fn parse_discord_id(raw: &str, field_name: &str) -> anyhow::Result<u64> {

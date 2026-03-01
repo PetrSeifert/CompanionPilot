@@ -62,12 +62,7 @@ impl EventHandler for Handler {
                         "Discord reply ready"
                     );
                 }
-                let suppress_text_reply = reply
-                    .tool_calls
-                    .iter()
-                    .any(|call| call.tool_name == "discord_voice_listen_turn");
-
-                if suppress_text_reply || reply.text.trim().is_empty() {
+                if reply.text.trim().is_empty() {
                     return;
                 }
 
