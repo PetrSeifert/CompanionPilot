@@ -95,6 +95,7 @@ struct CapturedTurn {
 #[derive(Debug)]
 struct VoiceSession {
     channel_id: u64,
+    requester_user_id: u64,
     chunk_queue: Mutex<VecDeque<AudioChunk>>,
     queue_notify: Notify,
     listen_lock: Mutex<()>,
@@ -104,9 +105,10 @@ struct VoiceSession {
 }
 
 impl VoiceSession {
-    fn new(channel_id: u64) -> Self {
+    fn new(channel_id: u64, requester_user_id: u64) -> Self {
         Self {
             channel_id,
+            requester_user_id,
             chunk_queue: Mutex::new(VecDeque::new()),
             queue_notify: Notify::new(),
             listen_lock: Mutex::new(()),
@@ -367,7 +369,7 @@ impl VoiceManager {
                 format!("failed to join voice channel {channel_id} in guild {guild_id}")
             })?;
 
-        let session = Arc::new(VoiceSession::new(channel_id));
+        let session = Arc::new(VoiceSession::new(channel_id, requester_user_id));
         {
             let mut call = call_lock.lock().await;
             call.remove_all_global_events();
@@ -518,7 +520,7 @@ impl VoiceManager {
         };
         let transcript_for_orchestrator = format!("{speaker_prefix}{transcript}");
 
-        let synthetic_user_id = format!("voice:{guild_id}:{}", session.channel_id);
+        let memory_user_id = session.requester_user_id.to_string();
         let orchestrator = self
             .orchestrator
             .read()
@@ -528,7 +530,7 @@ impl VoiceManager {
         let reply_text = orchestrator
             .handle_voice_transcript(MessageCtx {
                 message_id: format!("voice-turn-{}", Utc::now().timestamp_millis()),
-                user_id: synthetic_user_id,
+                user_id: memory_user_id,
                 guild_id: guild_id.to_string(),
                 channel_id: session.channel_id.to_string(),
                 content: transcript_for_orchestrator,
