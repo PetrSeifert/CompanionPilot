@@ -42,6 +42,7 @@ psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/00
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0002_chat_messages.sql
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0003_tool_call_logs.sql
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0004_planner_decision_logs.sql
+psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0005_message_latency_logs.sql
 ```
 
 4. Run the service:

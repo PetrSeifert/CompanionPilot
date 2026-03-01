@@ -87,6 +87,10 @@ pub fn router(state: AppState) -> Router {
             "/api/users/{user_id}/decisions",
             get(api_list_decisions).delete(api_clear_decisions),
         )
+        .route(
+            "/api/users/{user_id}/latencies",
+            get(api_list_message_latencies).delete(api_clear_message_latencies),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -249,6 +253,31 @@ async fn api_clear_decisions(
     let deleted = state
         .memory
         .clear_planner_decisions(&user_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(DeletedResponse { deleted }))
+}
+
+async fn api_list_message_latencies(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Query(query): Query<LimitQuery>,
+) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
+    let latencies = state
+        .memory
+        .list_message_latencies(&user_id, query.limit)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(latencies))
+}
+
+async fn api_clear_message_latencies(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<DeletedResponse>, (axum::http::StatusCode, String)> {
+    let deleted = state
+        .memory
+        .clear_message_latencies(&user_id)
         .await
         .map_err(internal_error)?;
     Ok(Json(DeletedResponse { deleted }))

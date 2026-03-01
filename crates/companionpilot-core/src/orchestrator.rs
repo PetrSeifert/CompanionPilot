@@ -12,8 +12,9 @@ use crate::{
     safety::SafetyPolicy,
     tools::ToolExecutor,
     types::{
-        ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, OrchestratorReply,
-        PlannerDecisionRecord, ReplyTimings, ToolCall, ToolCallRecord, ToolCallTiming,
+        ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, MessageLatencyRecord,
+        OrchestratorReply, PlannerDecisionRecord, ReplyTimings, ToolCall, ToolCallRecord,
+        ToolCallTiming,
     },
     voice::VoiceReplyOrchestrator,
 };
@@ -173,8 +174,9 @@ impl DefaultChatOrchestrator {
         let planner_decision = self
             .decide_unified_plan(&ctx.content, &memory_context)
             .await;
-        let mut planner_ms = elapsed_ms(planner_started_at);
-        self.record_unified_planner_decision(&ctx, &planner_decision)
+        let unified_planner_ms = elapsed_ms(planner_started_at);
+        let mut planner_ms = unified_planner_ms;
+        self.record_unified_planner_decision(&ctx, &planner_decision, unified_planner_ms)
             .await;
 
         let (mut pending_tool_calls, memory_decision) = match planner_decision {
@@ -238,8 +240,9 @@ impl DefaultChatOrchestrator {
             let followup_decision = self
                 .decide_tool_followup(&ctx.content, &memory_context, &tool_outputs)
                 .await;
-            planner_ms = planner_ms.saturating_add(elapsed_ms(followup_started_at));
-            self.record_tool_followup_decision(&ctx, tool_round, &followup_decision)
+            let followup_ms = elapsed_ms(followup_started_at);
+            planner_ms = planner_ms.saturating_add(followup_ms);
+            self.record_tool_followup_decision(&ctx, tool_round, &followup_decision, followup_ms)
                 .await;
 
             match followup_decision {
@@ -354,6 +357,19 @@ impl DefaultChatOrchestrator {
             record_assistant_message_ms,
             tool_calls: tool_timings,
         };
+        self.record_message_latency(MessageLatencyRecord {
+            user_id: ctx.user_id.clone(),
+            guild_id: ctx.guild_id.clone(),
+            channel_id: ctx.channel_id.clone(),
+            message_id: ctx.message_id.clone(),
+            stt_ms: None,
+            tts_ms: None,
+            final_response_ms: timings.total_ms,
+            decision_ms: timings.planner_ms,
+            tool_call_ms: timings.tool_execution_ms,
+            timestamp: Utc::now(),
+        })
+        .await;
 
         if timings.total_ms >= SLOW_REPLY_THRESHOLD_MS {
             warn!(
@@ -598,10 +614,12 @@ impl DefaultChatOrchestrator {
                 Ok(result) => result,
                 Err(error) => {
                     let error_text = error.to_string();
+                    let duration_ms = elapsed_ms(tool_started_at);
                     self.record_tool_call(ToolCallRecord {
                         user_id: ctx.user_id.clone(),
                         guild_id: ctx.guild_id.clone(),
                         channel_id: ctx.channel_id.clone(),
+                        message_id: ctx.message_id.clone(),
                         tool_name: tool_name.clone(),
                         source: source.to_owned(),
                         args_json: args.to_string(),
@@ -609,10 +627,10 @@ impl DefaultChatOrchestrator {
                         citations: Vec::new(),
                         success: false,
                         error: Some(error_text.clone()),
+                        duration_ms,
                         timestamp: Utc::now(),
                     })
                     .await;
-                    let duration_ms = elapsed_ms(tool_started_at);
                     tool_timings.push(ToolCallTiming {
                         tool_name: tool_name.clone(),
                         duration_ms,
@@ -637,11 +655,13 @@ impl DefaultChatOrchestrator {
                     continue;
                 }
             };
+            let duration_ms = elapsed_ms(tool_started_at);
 
             self.record_tool_call(ToolCallRecord {
                 user_id: ctx.user_id.clone(),
                 guild_id: ctx.guild_id.clone(),
                 channel_id: ctx.channel_id.clone(),
+                message_id: ctx.message_id.clone(),
                 tool_name: tool_name.clone(),
                 source: source.to_owned(),
                 args_json: args.to_string(),
@@ -649,11 +669,10 @@ impl DefaultChatOrchestrator {
                 citations: tool_result.citations.clone(),
                 success: true,
                 error: None,
+                duration_ms,
                 timestamp: Utc::now(),
             })
             .await;
-
-            let duration_ms = elapsed_ms(tool_started_at);
             tool_timings.push(ToolCallTiming {
                 tool_name: tool_name.clone(),
                 duration_ms,
@@ -688,6 +707,7 @@ impl DefaultChatOrchestrator {
         &self,
         ctx: &MessageCtx,
         decision: &UnifiedPlanDecision,
+        duration_ms: u64,
     ) {
         let (decision_value, rationale, payload, success, error) = match decision {
             UnifiedPlanDecision::UsePlan {
@@ -710,6 +730,7 @@ impl DefaultChatOrchestrator {
             payload,
             success,
             error,
+            duration_ms,
         )
         .await;
     }
@@ -719,6 +740,7 @@ impl DefaultChatOrchestrator {
         ctx: &MessageCtx,
         round: usize,
         decision: &ToolFollowupDecision,
+        duration_ms: u64,
     ) {
         let (decision_value, rationale, payload, success, error) = match decision {
             ToolFollowupDecision::Final {
@@ -759,6 +781,7 @@ impl DefaultChatOrchestrator {
             }),
             success,
             error,
+            duration_ms,
         )
         .await;
     }
@@ -772,17 +795,20 @@ impl DefaultChatOrchestrator {
         payload: Value,
         success: bool,
         error: Option<String>,
+        duration_ms: u64,
     ) {
         let record = PlannerDecisionRecord {
             user_id: ctx.user_id.clone(),
             guild_id: ctx.guild_id.clone(),
             channel_id: ctx.channel_id.clone(),
+            message_id: ctx.message_id.clone(),
             planner: planner.to_owned(),
             decision: decision.to_owned(),
             rationale,
             payload_json: payload.to_string(),
             success,
             error,
+            duration_ms,
             timestamp: Utc::now(),
         };
 
@@ -791,6 +817,12 @@ impl DefaultChatOrchestrator {
                 ?store_error,
                 planner, "failed to persist planner decision log"
             );
+        }
+    }
+
+    async fn record_message_latency(&self, latency: MessageLatencyRecord) {
+        if let Err(error) = self.memory.record_message_latency(latency).await {
+            warn!(?error, "failed to persist message latency log");
         }
     }
 }

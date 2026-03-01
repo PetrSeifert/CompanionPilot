@@ -24,7 +24,10 @@ use songbird::{
 use tokio::sync::{Mutex, Notify, RwLock};
 use tracing::{info, warn};
 
-use crate::types::MessageCtx;
+use crate::{
+    memory::MemoryStore,
+    types::{MessageCtx, MessageLatencyRecord},
+};
 
 const DEFAULT_LISTEN_WINDOW_MS: u64 = 12_000;
 const DEFAULT_CHUNK_GAP_MS: u64 = 700;
@@ -261,6 +264,7 @@ pub trait VoiceReplyOrchestrator: Send + Sync {
 
 pub struct VoiceManager {
     config: VoiceRuntimeConfig,
+    memory: Arc<dyn MemoryStore>,
     sessions: RwLock<HashMap<u64, Arc<VoiceSession>>>,
     user_voice_channels: RwLock<HashMap<(u64, u64), u64>>,
     songbird: RwLock<Option<Arc<Songbird>>>,
@@ -278,7 +282,7 @@ impl std::fmt::Debug for VoiceManager {
 }
 
 impl VoiceManager {
-    pub fn new(config: VoiceRuntimeConfig) -> Arc<Self> {
+    pub fn new(config: VoiceRuntimeConfig, memory: Arc<dyn MemoryStore>) -> Arc<Self> {
         Arc::new(Self {
             openai: OpenAiAudioClient::new(
                 config.openai_api_key.clone(),
@@ -287,6 +291,7 @@ impl VoiceManager {
                 config.tts_voice.clone(),
             ),
             config,
+            memory,
             sessions: RwLock::new(HashMap::new()),
             user_voice_channels: RwLock::new(HashMap::new()),
             songbird: RwLock::new(None),
@@ -502,12 +507,15 @@ impl VoiceManager {
         };
         session.touch().await;
 
+        let turn_started_at = Instant::now();
+        let stt_started_at = Instant::now();
         let wav_payload = pcm_i16_to_wav_bytes(&captured_turn.pcm_samples, 2, 48_000);
         let transcript = self
             .openai
             .transcribe_wav(&wav_payload)
             .await
             .context("STT transcription failed")?;
+        let stt_ms = elapsed_ms(stt_started_at);
         let transcript = transcript.trim();
         if transcript.is_empty() {
             anyhow::bail!("transcription returned empty text");
@@ -527,18 +535,20 @@ impl VoiceManager {
             .await
             .clone()
             .context("voice orchestrator is not configured")?;
+        let message_ctx = MessageCtx {
+            message_id: format!("voice-turn-{}", Utc::now().timestamp_millis()),
+            user_id: memory_user_id,
+            guild_id: guild_id.to_string(),
+            channel_id: session.channel_id.to_string(),
+            content: transcript_for_orchestrator,
+            timestamp: Utc::now(),
+        };
         let reply_text = orchestrator
-            .handle_voice_transcript(MessageCtx {
-                message_id: format!("voice-turn-{}", Utc::now().timestamp_millis()),
-                user_id: memory_user_id,
-                guild_id: guild_id.to_string(),
-                channel_id: session.channel_id.to_string(),
-                content: transcript_for_orchestrator,
-                timestamp: Utc::now(),
-            })
+            .handle_voice_transcript(message_ctx.clone())
             .await
             .context("failed to generate assistant reply for voice turn")?;
 
+        let tts_started_at = Instant::now();
         let reply_for_tts = clamp_tts_input(&reply_text);
         let tts_audio = self
             .openai
@@ -547,6 +557,26 @@ impl VoiceManager {
             .context("TTS synthesis failed")?;
         self.play_tts_audio(guild_id, Arc::clone(&session), tts_audio)
             .await?;
+        let tts_ms = elapsed_ms(tts_started_at);
+        let final_response_ms = elapsed_ms(turn_started_at);
+        if let Err(error) = self
+            .memory
+            .record_message_latency(MessageLatencyRecord {
+                user_id: message_ctx.user_id.clone(),
+                guild_id: message_ctx.guild_id.clone(),
+                channel_id: message_ctx.channel_id.clone(),
+                message_id: message_ctx.message_id.clone(),
+                stt_ms: Some(stt_ms),
+                tts_ms: Some(tts_ms),
+                final_response_ms,
+                decision_ms: 0,
+                tool_call_ms: 0,
+                timestamp: Utc::now(),
+            })
+            .await
+        {
+            warn!(?error, "failed to persist voice latency metrics");
+        }
         session.touch().await;
 
         Ok(transcript.to_owned())
@@ -848,6 +878,15 @@ fn audio_magic(bytes: &[u8]) -> String {
 fn parse_discord_id(raw: &str, field_name: &str) -> anyhow::Result<u64> {
     raw.parse::<u64>()
         .with_context(|| format!("invalid {field_name} `{raw}`"))
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    let ms = started_at.elapsed().as_millis();
+    if ms > u128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        ms as u64
+    }
 }
 
 fn pcm_i16_to_wav_bytes(samples: &[i16], channels: u16, sample_rate: u32) -> Vec<u8> {

@@ -11,8 +11,8 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 
 use crate::types::{
-    ChatMessageRecord, MemoryContext, MemoryFact, PlannerDecisionRecord, ToolCallRecord,
-    UserDashboardSummary,
+    ChatMessageRecord, MemoryContext, MemoryFact, MessageLatencyRecord, PlannerDecisionRecord,
+    ToolCallRecord, UserDashboardSummary,
 };
 
 use super::MemoryStore;
@@ -24,6 +24,7 @@ pub struct InMemoryMemoryStore {
     chats: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
     tool_calls: Arc<RwLock<HashMap<String, Vec<ToolCallRecord>>>>,
     planner_decisions: Arc<RwLock<HashMap<String, Vec<PlannerDecisionRecord>>>>,
+    message_latencies: Arc<RwLock<HashMap<String, Vec<MessageLatencyRecord>>>>,
     chat_seq: AtomicU64,
 }
 
@@ -35,6 +36,7 @@ impl Default for InMemoryMemoryStore {
             chats: Arc::new(RwLock::new(HashMap::new())),
             tool_calls: Arc::new(RwLock::new(HashMap::new())),
             planner_decisions: Arc::new(RwLock::new(HashMap::new())),
+            message_latencies: Arc::new(RwLock::new(HashMap::new())),
             chat_seq: AtomicU64::new(1),
         }
     }
@@ -182,6 +184,7 @@ impl MemoryStore for InMemoryMemoryStore {
 
     async fn clear_chat_messages(&self, user_id: &str) -> anyhow::Result<u64> {
         let mut chats = self.chats.write().await;
+        self.message_latencies.write().await.remove(user_id);
         let removed = chats
             .remove(user_id)
             .map(|list| list.len() as u64)
@@ -313,5 +316,54 @@ impl MemoryStore for InMemoryMemoryStore {
             decisions = decisions.split_off(start);
         }
         Ok(decisions)
+    }
+
+    async fn record_message_latency(&self, latency: MessageLatencyRecord) -> anyhow::Result<()> {
+        let user_id = latency.user_id.clone();
+        let mut latencies = self.message_latencies.write().await;
+        let entries = latencies.entry(user_id).or_default();
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|entry| entry.message_id == latency.message_id)
+        {
+            existing.stt_ms = latency.stt_ms.or(existing.stt_ms);
+            existing.tts_ms = latency.tts_ms.or(existing.tts_ms);
+            existing.decision_ms = existing.decision_ms.max(latency.decision_ms);
+            existing.tool_call_ms = existing.tool_call_ms.max(latency.tool_call_ms);
+            existing.final_response_ms = existing.final_response_ms.max(latency.final_response_ms);
+            existing.timestamp = existing.timestamp.max(latency.timestamp);
+        } else {
+            entries.push(latency);
+        }
+        Ok(())
+    }
+
+    async fn list_message_latencies(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MessageLatencyRecord>> {
+        let mut latencies = self
+            .message_latencies
+            .read()
+            .await
+            .get(user_id)
+            .cloned()
+            .unwrap_or_default();
+        latencies.sort_by_key(|latency| latency.timestamp);
+        if latencies.len() > limit {
+            let start = latencies.len().saturating_sub(limit);
+            latencies = latencies.split_off(start);
+        }
+        Ok(latencies)
+    }
+
+    async fn clear_message_latencies(&self, user_id: &str) -> anyhow::Result<u64> {
+        let mut latencies = self.message_latencies.write().await;
+        let removed = latencies
+            .remove(user_id)
+            .map(|list| list.len() as u64)
+            .unwrap_or(0);
+        Ok(removed)
     }
 }

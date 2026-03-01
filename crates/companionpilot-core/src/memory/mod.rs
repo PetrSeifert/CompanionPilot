@@ -4,8 +4,8 @@ mod postgres;
 use async_trait::async_trait;
 
 use crate::types::{
-    ChatMessageRecord, MemoryContext, MemoryFact, PlannerDecisionRecord, ToolCallRecord,
-    UserDashboardSummary,
+    ChatMessageRecord, MemoryContext, MemoryFact, MessageLatencyRecord, PlannerDecisionRecord,
+    ToolCallRecord, UserDashboardSummary,
 };
 
 pub use in_memory::InMemoryMemoryStore;
@@ -68,4 +68,14 @@ pub trait MemoryStore: Send + Sync {
         user_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<PlannerDecisionRecord>>;
+
+    async fn record_message_latency(&self, latency: MessageLatencyRecord) -> anyhow::Result<()>;
+
+    async fn list_message_latencies(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MessageLatencyRecord>>;
+
+    async fn clear_message_latencies(&self, user_id: &str) -> anyhow::Result<u64>;
 }

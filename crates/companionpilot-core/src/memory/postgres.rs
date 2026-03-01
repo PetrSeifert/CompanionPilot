@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::types::{
-    ChatMessageRecord, ChatRole, MemoryContext, MemoryFact, PlannerDecisionRecord, ToolCallRecord,
-    UserDashboardSummary,
+    ChatMessageRecord, ChatRole, MemoryContext, MemoryFact, MessageLatencyRecord,
+    PlannerDecisionRecord, ToolCallRecord, UserDashboardSummary,
 };
 
 use super::MemoryStore;
@@ -185,9 +185,10 @@ impl MemoryStore for PostgresMemoryStore {
     async fn record_chat_message(&self, message: ChatMessageRecord) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO chat_messages
-             (user_id, guild_id, channel_id, role, content, timestamp)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             (message_id, user_id, guild_id, channel_id, role, content, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
+        .bind(message.id)
         .bind(message.user_id)
         .bind(message.guild_id)
         .bind(message.channel_id)
@@ -211,6 +212,7 @@ impl MemoryStore for PostgresMemoryStore {
             _,
             (
                 i64,
+                Option<String>,
                 String,
                 String,
                 String,
@@ -219,7 +221,7 @@ impl MemoryStore for PostgresMemoryStore {
                 chrono::DateTime<chrono::Utc>,
             ),
         >(
-            "SELECT id, user_id, guild_id, channel_id, role, content, timestamp
+            "SELECT id, message_id, user_id, guild_id, channel_id, role, content, timestamp
              FROM chat_messages
              WHERE user_id = $1
              ORDER BY timestamp DESC
@@ -231,14 +233,16 @@ impl MemoryStore for PostgresMemoryStore {
         .await?
         .into_iter()
         .map(
-            |(id, user_id, guild_id, channel_id, role, content, timestamp)| ChatMessageRecord {
-                id: id.to_string(),
-                user_id,
-                guild_id,
-                channel_id,
-                role: parse_role(&role),
-                content,
-                timestamp,
+            |(id, message_id, user_id, guild_id, channel_id, role, content, timestamp)| {
+                ChatMessageRecord {
+                    id: message_id.unwrap_or_else(|| id.to_string()),
+                    user_id,
+                    guild_id,
+                    channel_id,
+                    role: parse_role(&role),
+                    content,
+                    timestamp,
+                }
             },
         )
         .collect::<Vec<_>>();
@@ -248,20 +252,25 @@ impl MemoryStore for PostgresMemoryStore {
     }
 
     async fn delete_chat_message(&self, user_id: &str, message_id: &str) -> anyhow::Result<bool> {
-        let id = match message_id.parse::<i64>() {
-            Ok(value) => value,
-            Err(_) => return Ok(false),
-        };
-        let result = sqlx::query("DELETE FROM chat_messages WHERE user_id = $1 AND id = $2")
-            .bind(user_id)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let parsed_numeric_id = message_id.parse::<i64>().ok();
+        let result = sqlx::query(
+            "DELETE FROM chat_messages
+             WHERE user_id = $1 AND (message_id = $2 OR id = COALESCE($3, -1))",
+        )
+        .bind(user_id)
+        .bind(message_id)
+        .bind(parsed_numeric_id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
     async fn clear_chat_messages(&self, user_id: &str) -> anyhow::Result<u64> {
         let result = sqlx::query("DELETE FROM chat_messages WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM message_latency_logs WHERE user_id = $1")
             .bind(user_id)
             .execute(&self.pool)
             .await?;
@@ -347,12 +356,13 @@ impl MemoryStore for PostgresMemoryStore {
     async fn record_tool_call(&self, tool_call: ToolCallRecord) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO tool_call_logs
-             (user_id, guild_id, channel_id, tool_name, source, args_json, result_text, citations_text, success, error, timestamp)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             (user_id, guild_id, channel_id, message_id, tool_name, source, args_json, result_text, citations_text, success, error, duration_ms, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(tool_call.user_id)
         .bind(tool_call.guild_id)
         .bind(tool_call.channel_id)
+        .bind(tool_call.message_id)
         .bind(tool_call.tool_name)
         .bind(tool_call.source)
         .bind(tool_call.args_json)
@@ -360,6 +370,7 @@ impl MemoryStore for PostgresMemoryStore {
         .bind(tool_call.citations.join("\n"))
         .bind(tool_call.success)
         .bind(tool_call.error)
+        .bind(u64_to_i64_saturated(tool_call.duration_ms))
         .bind(tool_call.timestamp)
         .execute(&self.pool)
         .await?;
@@ -384,12 +395,14 @@ impl MemoryStore for PostgresMemoryStore {
                 String,
                 String,
                 String,
+                String,
                 bool,
                 Option<String>,
+                i64,
                 chrono::DateTime<chrono::Utc>,
             ),
         >(
-            "SELECT user_id, guild_id, channel_id, tool_name, source, args_json, result_text, citations_text, success, error, timestamp
+            "SELECT user_id, guild_id, channel_id, message_id, tool_name, source, args_json, result_text, citations_text, success, error, duration_ms, timestamp
              FROM tool_call_logs
              WHERE user_id = $1
              ORDER BY timestamp DESC
@@ -405,6 +418,7 @@ impl MemoryStore for PostgresMemoryStore {
                 user_id,
                 guild_id,
                 channel_id,
+                message_id,
                 tool_name,
                 source,
                 args_json,
@@ -412,11 +426,13 @@ impl MemoryStore for PostgresMemoryStore {
                 citations_text,
                 success,
                 error,
+                duration_ms,
                 timestamp,
             )| ToolCallRecord {
                 user_id,
                 guild_id,
                 channel_id,
+                message_id,
                 tool_name,
                 source,
                 args_json,
@@ -424,6 +440,7 @@ impl MemoryStore for PostgresMemoryStore {
                 citations: split_citations(&citations_text),
                 success,
                 error,
+                duration_ms: i64_to_u64_saturated(duration_ms),
                 timestamp,
             },
         )
@@ -436,18 +453,20 @@ impl MemoryStore for PostgresMemoryStore {
     async fn record_planner_decision(&self, decision: PlannerDecisionRecord) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO planner_decision_logs
-             (user_id, guild_id, channel_id, planner, decision, rationale, payload_json, success, error, timestamp)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             (user_id, guild_id, channel_id, message_id, planner, decision, rationale, payload_json, success, error, duration_ms, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(decision.user_id)
         .bind(decision.guild_id)
         .bind(decision.channel_id)
+        .bind(decision.message_id)
         .bind(decision.planner)
         .bind(decision.decision)
         .bind(decision.rationale)
         .bind(decision.payload_json)
         .bind(decision.success)
         .bind(decision.error)
+        .bind(u64_to_i64_saturated(decision.duration_ms))
         .bind(decision.timestamp)
         .execute(&self.pool)
         .await?;
@@ -471,12 +490,14 @@ impl MemoryStore for PostgresMemoryStore {
                 String,
                 String,
                 String,
+                String,
                 bool,
                 Option<String>,
+                i64,
                 chrono::DateTime<chrono::Utc>,
             ),
         >(
-            "SELECT user_id, guild_id, channel_id, planner, decision, rationale, payload_json, success, error, timestamp
+            "SELECT user_id, guild_id, channel_id, message_id, planner, decision, rationale, payload_json, success, error, duration_ms, timestamp
              FROM planner_decision_logs
              WHERE user_id = $1
              ORDER BY timestamp DESC
@@ -492,23 +513,27 @@ impl MemoryStore for PostgresMemoryStore {
                 user_id,
                 guild_id,
                 channel_id,
+                message_id,
                 planner,
                 decision,
                 rationale,
                 payload_json,
                 success,
                 error,
+                duration_ms,
                 timestamp,
             )| PlannerDecisionRecord {
                 user_id,
                 guild_id,
                 channel_id,
+                message_id,
                 planner,
                 decision,
                 rationale,
                 payload_json,
                 success,
                 error,
+                duration_ms: i64_to_u64_saturated(duration_ms),
                 timestamp,
             },
         )
@@ -516,6 +541,106 @@ impl MemoryStore for PostgresMemoryStore {
 
         decisions.reverse();
         Ok(decisions)
+    }
+
+    async fn record_message_latency(&self, latency: MessageLatencyRecord) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO message_latency_logs
+             (user_id, guild_id, channel_id, message_id, stt_ms, tts_ms, final_response_ms, decision_ms, tool_call_ms, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (user_id, guild_id, channel_id, message_id)
+             DO UPDATE SET
+               stt_ms = COALESCE(EXCLUDED.stt_ms, message_latency_logs.stt_ms),
+               tts_ms = COALESCE(EXCLUDED.tts_ms, message_latency_logs.tts_ms),
+               final_response_ms = GREATEST(message_latency_logs.final_response_ms, EXCLUDED.final_response_ms),
+               decision_ms = GREATEST(message_latency_logs.decision_ms, EXCLUDED.decision_ms),
+               tool_call_ms = GREATEST(message_latency_logs.tool_call_ms, EXCLUDED.tool_call_ms),
+               timestamp = GREATEST(message_latency_logs.timestamp, EXCLUDED.timestamp)",
+        )
+        .bind(latency.user_id)
+        .bind(latency.guild_id)
+        .bind(latency.channel_id)
+        .bind(latency.message_id)
+        .bind(latency.stt_ms.map(u64_to_i64_saturated))
+        .bind(latency.tts_ms.map(u64_to_i64_saturated))
+        .bind(u64_to_i64_saturated(latency.final_response_ms))
+        .bind(u64_to_i64_saturated(latency.decision_ms))
+        .bind(u64_to_i64_saturated(latency.tool_call_ms))
+        .bind(latency.timestamp)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_message_latencies(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MessageLatencyRecord>> {
+        let limit = limit as i64;
+        let mut latencies = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                Option<i64>,
+                Option<i64>,
+                i64,
+                i64,
+                i64,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(
+            "SELECT user_id, guild_id, channel_id, message_id, stt_ms, tts_ms, final_response_ms, decision_ms, tool_call_ms, timestamp
+             FROM message_latency_logs
+             WHERE user_id = $1
+             ORDER BY timestamp DESC
+             LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(
+            |(
+                user_id,
+                guild_id,
+                channel_id,
+                message_id,
+                stt_ms,
+                tts_ms,
+                final_response_ms,
+                decision_ms,
+                tool_call_ms,
+                timestamp,
+            )| MessageLatencyRecord {
+                user_id,
+                guild_id,
+                channel_id,
+                message_id,
+                stt_ms: stt_ms.map(i64_to_u64_saturated),
+                tts_ms: tts_ms.map(i64_to_u64_saturated),
+                final_response_ms: i64_to_u64_saturated(final_response_ms),
+                decision_ms: i64_to_u64_saturated(decision_ms),
+                tool_call_ms: i64_to_u64_saturated(tool_call_ms),
+                timestamp,
+            },
+        )
+        .collect::<Vec<_>>();
+
+        latencies.reverse();
+        Ok(latencies)
+    }
+
+    async fn clear_message_latencies(&self, user_id: &str) -> anyhow::Result<u64> {
+        let result = sqlx::query("DELETE FROM message_latency_logs WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -532,4 +657,16 @@ fn split_citations(raw: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(|line| line.to_owned())
         .collect()
+}
+
+fn u64_to_i64_saturated(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        value as i64
+    }
+}
+
+fn i64_to_u64_saturated(value: i64) -> u64 {
+    if value <= 0 { 0 } else { value as u64 }
 }

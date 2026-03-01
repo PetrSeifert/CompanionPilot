@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
 
     let model = build_model_provider(&config);
     let memory = build_memory_store(&config).await?;
-    let voice = build_voice_manager(&config);
+    let voice = build_voice_manager(&config, memory.clone());
     let tools = build_tools(&config, voice.clone());
 
     let memory_for_dashboard = memory.clone();
@@ -164,7 +164,10 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
     })
 }
 
-fn build_voice_manager(config: &AppConfig) -> Option<Arc<VoiceManager>> {
+fn build_voice_manager(
+    config: &AppConfig,
+    memory: Arc<dyn MemoryStore>,
+) -> Option<Arc<VoiceManager>> {
     if !config.voice_enabled {
         return None;
     }
@@ -181,15 +184,18 @@ fn build_voice_manager(config: &AppConfig) -> Option<Arc<VoiceManager>> {
         );
     }
 
-    Some(VoiceManager::new(VoiceRuntimeConfig {
-        openai_api_key,
-        stt_model: config.openai_stt_model.clone(),
-        tts_model: config.openai_tts_model.clone(),
-        tts_voice: config.openai_tts_voice.clone(),
-        allowlist,
-        idle_timeout: std::time::Duration::from_secs(config.voice_idle_timeout_sec),
-        default_chunk_gap: std::time::Duration::from_millis(config.voice_chunk_gap_ms),
-        default_listen_window: std::time::Duration::from_millis(config.voice_listen_window_ms),
-        default_max_turn: std::time::Duration::from_millis(config.voice_max_turn_ms),
-    }))
+    Some(VoiceManager::new(
+        VoiceRuntimeConfig {
+            openai_api_key,
+            stt_model: config.openai_stt_model.clone(),
+            tts_model: config.openai_tts_model.clone(),
+            tts_voice: config.openai_tts_voice.clone(),
+            allowlist,
+            idle_timeout: std::time::Duration::from_secs(config.voice_idle_timeout_sec),
+            default_chunk_gap: std::time::Duration::from_millis(config.voice_chunk_gap_ms),
+            default_listen_window: std::time::Duration::from_millis(config.voice_listen_window_ms),
+            default_max_turn: std::time::Duration::from_millis(config.voice_max_turn_ms),
+        },
+        memory,
+    ))
 }

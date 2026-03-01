@@ -111,6 +111,7 @@ pub struct ToolCallRecord {
     pub user_id: String,
     pub guild_id: String,
     pub channel_id: String,
+    pub message_id: String,
     pub tool_name: String,
     pub source: String,
     pub args_json: String,
@@ -118,6 +119,8 @@ pub struct ToolCallRecord {
     pub citations: Vec<String>,
     pub success: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -126,11 +129,28 @@ pub struct PlannerDecisionRecord {
     pub user_id: String,
     pub guild_id: String,
     pub channel_id: String,
+    pub message_id: String,
     pub planner: String,
     pub decision: String,
     pub rationale: String,
     pub payload_json: String,
     pub success: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageLatencyRecord {
+    pub user_id: String,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub message_id: String,
+    pub stt_ms: Option<u64>,
+    pub tts_ms: Option<u64>,
+    pub final_response_ms: u64,
+    pub decision_ms: u64,
+    pub tool_call_ms: u64,
     pub timestamp: DateTime<Utc>,
 }

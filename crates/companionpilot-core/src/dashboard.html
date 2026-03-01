@@ -777,6 +777,12 @@ body::before {
   background: rgba(58, 138, 124, 0.06);
 }
 
+.detail-icon.latency {
+  color: var(--text-primary);
+  border-color: rgba(224, 221, 213, 0.25);
+  background: rgba(224, 221, 213, 0.06);
+}
+
 .reply-timings {
   font-family: var(--font-mono);
   font-size: 0.6rem;
@@ -1278,6 +1284,7 @@ pre.json-block {
     decisions: [],
     msgToolCalls: [],
     msgDecisions: [],
+    msgLatencies: [],
     loading: false,
     modalResolve: null,
   };
@@ -1319,6 +1326,28 @@ pre.json-block {
   function fullDateTime(ts) {
     if (!ts) return '';
     return new Date(ts).toLocaleString();
+  }
+
+  function formatDurationMs(ms) {
+    if (ms === null || ms === undefined) return '';
+    const value = Number(ms);
+    if (!Number.isFinite(value) || value < 0) return '';
+    return Math.round(value) + 'ms';
+  }
+
+  function formatDurationSuffix(ms) {
+    const formatted = formatDurationMs(ms);
+    return formatted ? ' (' + formatted + ')' : '';
+  }
+
+  function findMessageLatency(latencies, windowStart, windowEnd) {
+    const matches = latencies
+      .filter(lat => {
+        const t = new Date(lat.timestamp).getTime();
+        return t >= windowStart && t <= windowEnd;
+      })
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    return matches.length > 0 ? matches[matches.length - 1] : null;
   }
 
   function escapeAttr(str) {
@@ -1794,14 +1823,16 @@ pre.json-block {
     try {
       switch (tab) {
         case 'messages': {
-          const [msgs, tcs, decs] = await Promise.all([
+          const [msgs, tcs, decs, lats] = await Promise.all([
             api('GET', '/api/users/' + enc + '/messages?limit=200'),
             api('GET', '/api/users/' + enc + '/tool-calls?limit=200'),
             api('GET', '/api/users/' + enc + '/decisions?limit=200'),
+            api('GET', '/api/users/' + enc + '/latencies?limit=200'),
           ]);
           state.messages = msgs;
           state.msgToolCalls = tcs;
           state.msgDecisions = decs;
+          state.msgLatencies = lats;
           renderMessages();
           composerWrapper.classList.add('visible');
           break;
@@ -1843,6 +1874,7 @@ pre.json-block {
 
     const allToolCalls = state.msgToolCalls || [];
     const allDecisions = state.msgDecisions || [];
+    const allLatencies = state.msgLatencies || [];
 
     state.messages.forEach((msg, i) => {
       const bubble = document.createElement('div');
@@ -1879,20 +1911,56 @@ pre.json-block {
             break;
           }
         }
+        let windowEnd = msgTime + 120000;
+        for (let j = i + 1; j < state.messages.length; j++) {
+          if (state.messages[j].role === 'user') {
+            windowEnd = new Date(state.messages[j].timestamp).getTime();
+            break;
+          }
+        }
 
         const matchedTools = allToolCalls.filter(tc => {
           const t = new Date(tc.timestamp).getTime();
-          return t >= windowStart && t <= msgTime;
+          return t >= windowStart && t <= windowEnd;
         });
 
         const matchedDecisions = allDecisions.filter(dec => {
           const t = new Date(dec.timestamp).getTime();
-          return t >= windowStart && t <= msgTime;
+          return t >= windowStart && t <= windowEnd;
         });
+        const matchedLatency = findMessageLatency(allLatencies, windowStart, windowEnd);
 
-        if (matchedTools.length > 0 || matchedDecisions.length > 0) {
+        if (matchedTools.length > 0 || matchedDecisions.length > 0 || matchedLatency) {
           const details = document.createElement('div');
           details.className = 'reply-details';
+
+          if (matchedLatency) {
+            const timingItem = document.createElement('div');
+            timingItem.className = 'reply-detail-item';
+
+            const icon = document.createElement('span');
+            icon.className = 'detail-icon latency';
+            icon.textContent = 'TIME';
+
+            const segments = [];
+            const stt = formatDurationMs(matchedLatency.stt_ms);
+            const decision = formatDurationMs(matchedLatency.decision_ms);
+            const tool = formatDurationMs(matchedLatency.tool_call_ms);
+            const tts = formatDurationMs(matchedLatency.tts_ms);
+            const finalResponse = formatDurationMs(matchedLatency.final_response_ms);
+            if (stt) segments.push('STT ' + stt);
+            if (decision) segments.push('Decision ' + decision);
+            if (tool) segments.push('Tool ' + tool);
+            if (tts) segments.push('TTS ' + tts);
+            if (finalResponse) segments.push('Final ' + finalResponse);
+
+            const label = document.createElement('span');
+            label.textContent = segments.join(' | ');
+
+            timingItem.appendChild(icon);
+            timingItem.appendChild(label);
+            details.appendChild(timingItem);
+          }
 
           matchedDecisions.forEach(dec => {
             const item = document.createElement('div');
@@ -1903,7 +1971,7 @@ pre.json-block {
             icon.textContent = 'PLAN';
 
             const label = document.createElement('span');
-            label.textContent = dec.planner + ' \u2192 ' + dec.decision;
+            label.textContent = dec.planner + ' \u2192 ' + dec.decision + formatDurationSuffix(dec.duration_ms);
 
             item.appendChild(icon);
             item.appendChild(label);
@@ -1921,7 +1989,7 @@ pre.json-block {
             if (!tc.success) icon.style.color = 'var(--rose)';
 
             const label = document.createElement('span');
-            label.textContent = tc.tool_name;
+            label.textContent = tc.tool_name + formatDurationSuffix(tc.duration_ms);
 
             item.appendChild(icon);
             item.appendChild(label);
@@ -2061,7 +2129,7 @@ pre.json-block {
 
       const name = document.createElement('span');
       name.className = 'exp-card-name';
-      name.textContent = tc.tool_name;
+      name.textContent = tc.tool_name + formatDurationSuffix(tc.duration_ms);
 
       const badge = document.createElement('span');
       badge.className = 'badge ' + (tc.success ? 'badge-success' : 'badge-fail');
@@ -2091,6 +2159,11 @@ pre.json-block {
       // Source
       if (tc.source) {
         const row = makeDetailRow('SOURCE', tc.source);
+        inner.appendChild(row);
+      }
+
+      if (tc.duration_ms !== undefined && tc.duration_ms !== null) {
+        const row = makeDetailRow('LATENCY', formatDurationMs(tc.duration_ms));
         inner.appendChild(row);
       }
 
@@ -2168,6 +2241,7 @@ pre.json-block {
       name.appendChild(plannerText);
       name.appendChild(arrow);
       name.appendChild(decisionText);
+      name.appendChild(document.createTextNode(formatDurationSuffix(dec.duration_ms)));
 
       const badge = document.createElement('span');
       badge.className = 'badge ' + (dec.success ? 'badge-success' : 'badge-fail');
@@ -2197,6 +2271,11 @@ pre.json-block {
       // Rationale
       if (dec.rationale) {
         const row = makeDetailRow('RATIONALE', dec.rationale);
+        inner.appendChild(row);
+      }
+
+      if (dec.duration_ms !== undefined && dec.duration_ms !== null) {
+        const row = makeDetailRow('LATENCY', formatDurationMs(dec.duration_ms));
         inner.appendChild(row);
       }
 
@@ -2420,14 +2499,16 @@ pre.json-block {
 
       // Refresh messages, tool calls, and decisions from server
       const enc = encodeURIComponent(state.selectedUserId);
-      const [msgs, tcs, decs] = await Promise.all([
+      const [msgs, tcs, decs, lats] = await Promise.all([
         api('GET', '/api/users/' + enc + '/messages?limit=200'),
         api('GET', '/api/users/' + enc + '/tool-calls?limit=200'),
         api('GET', '/api/users/' + enc + '/decisions?limit=200'),
+        api('GET', '/api/users/' + enc + '/latencies?limit=200'),
       ]);
       state.messages = msgs;
       state.msgToolCalls = tcs;
       state.msgDecisions = decs;
+      state.msgLatencies = lats;
       renderMessages();
 
       const panel = $('#panel-messages');
