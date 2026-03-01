@@ -38,7 +38,7 @@ pub struct ToolRegistry {
     pub current_datetime: CurrentDateTimeTool,
     pub spotify_control_playback: Option<SpotifyControlPlaybackTool>,
     pub spotify_playing_status: SpotifyPlayingStatusTool,
-    pub spotify_users_list: Option<SpotifyUsersListTool>,
+    pub spotify_users_list: SpotifyUsersListTool,
     pub web_search: Option<TavilyWebSearchTool>,
     pub voice: Option<Arc<VoiceManager>>,
 }
@@ -60,13 +60,7 @@ impl ToolExecutor for ToolRegistry {
                 tool.control_playback(args).await
             }
             "spotify_playing_status" => self.spotify_playing_status.get_playing_status(args).await,
-            "spotify_users_list" => {
-                let tool = self
-                    .spotify_users_list
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("spotify_users_list tool is not configured"))?;
-                tool.list_users(args).await
-            }
+            "spotify_users_list" => self.spotify_users_list.list_users(args).await,
             "web_search" => {
                 let tool = self
                     .web_search

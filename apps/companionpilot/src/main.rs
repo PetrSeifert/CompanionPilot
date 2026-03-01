@@ -154,9 +154,10 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
     let spotify_control_playback = config.spotify_admin_token.as_ref().map(|token| {
         SpotifyControlPlaybackTool::new(config.spotify_control_api_base_url.clone(), token.clone())
     });
-    let spotify_users_list = config.spotify_admin_token.as_ref().map(|token| {
-        SpotifyUsersListTool::new(config.spotify_users_api_url.clone(), token.clone())
-    });
+    let spotify_users_list = SpotifyUsersListTool::new(
+        config.spotify_users_api_url.clone(),
+        config.spotify_admin_token.clone(),
+    );
 
     if web_search.is_none() {
         warn!("TAVILY_API_KEY not set; planner-selected web_search calls will fail");
@@ -165,9 +166,6 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
         warn!(
             "SPOTIFY_ADMIN_TOKEN not set; planner-selected spotify_control_playback calls will fail"
         );
-    }
-    if spotify_users_list.is_none() {
-        warn!("SPOTIFY_ADMIN_TOKEN not set; planner-selected spotify_users_list calls will fail");
     }
 
     Arc::new(ToolRegistry {

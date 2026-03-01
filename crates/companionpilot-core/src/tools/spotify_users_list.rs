@@ -12,7 +12,7 @@ pub const DEFAULT_SPOTIFY_USERS_API_URL: &str = "https://api.peterrock.dev/api/s
 pub struct SpotifyUsersListTool {
     client: Client,
     endpoint_url: String,
-    admin_token: String,
+    admin_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,22 +22,32 @@ struct SpotifyUserSummary {
     display_name: Option<String>,
 }
 
+impl Default for SpotifyUsersListTool {
+    fn default() -> Self {
+        Self::new(DEFAULT_SPOTIFY_USERS_API_URL, None)
+    }
+}
+
 impl SpotifyUsersListTool {
-    pub fn new(endpoint_url: impl Into<String>, admin_token: impl Into<String>) -> Self {
+    pub fn new(endpoint_url: impl Into<String>, admin_token: Option<String>) -> Self {
         Self {
             client: Client::new(),
             endpoint_url: endpoint_url.into(),
-            admin_token: admin_token.into(),
+            admin_token,
         }
     }
 
     pub async fn list_users(&self, _args: Value) -> anyhow::Result<ToolResult> {
         info!("spotify users list request start");
 
-        let payload = self
-            .client
-            .get(&self.endpoint_url)
-            .bearer_auth(&self.admin_token)
+        let request = self.client.get(&self.endpoint_url);
+        let request = if let Some(admin_token) = &self.admin_token {
+            request.bearer_auth(admin_token)
+        } else {
+            request
+        };
+
+        let payload = request
             .send()
             .await
             .map_err(|error| {

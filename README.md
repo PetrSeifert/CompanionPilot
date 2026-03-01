@@ -103,7 +103,7 @@ OpenRouter settings:
 - If `DATABASE_URL` is missing, memory uses in-process storage.
 - If `TAVILY_API_KEY` is missing, planner-selected `web_search` calls return a configuration error.
 - If `SPOTIFY_ADMIN_TOKEN` is missing, planner-selected `spotify_control_playback` calls return a configuration error.
-- If `SPOTIFY_ADMIN_TOKEN` is missing, planner-selected `spotify_users_list` calls return a configuration error.
+- `spotify_users_list` calls `GET /api/spotify/users` without auth by default.
 - HTTP endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
 
 ## Search diagnostics
