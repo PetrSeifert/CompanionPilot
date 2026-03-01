@@ -7,3 +7,4 @@ pub mod orchestrator;
 pub mod safety;
 pub mod tools;
 pub mod types;
+pub mod voice;

@@ -46,6 +46,24 @@ impl ModelProvider for MockModelProvider {
                     }
                 }));
             }
+            if extract_join_voice(&request.user_prompt) {
+                tool_calls.push(json!({
+                    "tool_name": "discord_voice_join",
+                    "args": {}
+                }));
+            }
+            if extract_listen_voice_turn(&request.user_prompt) {
+                tool_calls.push(json!({
+                    "tool_name": "discord_voice_listen_turn",
+                    "args": {}
+                }));
+            }
+            if extract_leave_voice(&request.user_prompt) {
+                tool_calls.push(json!({
+                    "tool_name": "discord_voice_leave",
+                    "args": {}
+                }));
+            }
 
             return Ok(json!({
                 "tool_calls": tool_calls,
@@ -104,4 +122,23 @@ fn extract_search_query(input: &str) -> Option<String> {
     } else {
         Some(query.to_owned())
     }
+}
+
+fn extract_join_voice(input: &str) -> bool {
+    let lowered = input.to_lowercase();
+    lowered.contains("join voice")
+        || lowered.contains("join the voice")
+        || lowered.contains("connect to voice")
+}
+
+fn extract_listen_voice_turn(input: &str) -> bool {
+    let lowered = input.to_lowercase();
+    lowered.contains("listen in voice")
+        || lowered.contains("listen now in voice")
+        || lowered.contains("voice turn")
+}
+
+fn extract_leave_voice(input: &str) -> bool {
+    let lowered = input.to_lowercase();
+    lowered.contains("leave voice") || lowered.contains("disconnect from voice")
 }

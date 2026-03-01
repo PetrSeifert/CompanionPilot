@@ -74,6 +74,8 @@ curl -X POST http://localhost:8080/chat \
 - Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 - Short-term memory is injected from recent channel turns, even when no long-term fact is stored.
+- Voice mode is optional and tool-call driven: configure `VOICE_ENABLED=true`, `VOICE_ALLOWLIST`, and `OPENAI_API_KEY` to allow AI-planned `discord_voice_join`, `discord_voice_listen_turn`, and `discord_voice_leave`.
+- Voice `listen_turn` captures the next speaking event with chunk-gap buffering, runs STT, generates a reply, and plays TTS back in voice while persisting transcript/reply to memory/dashboard.
 
 ## Model provider selection
 

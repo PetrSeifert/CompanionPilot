@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
+use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -14,6 +15,7 @@ use crate::{
         ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, OrchestratorReply,
         PlannerDecisionRecord, ReplyTimings, ToolCall, ToolCallRecord, ToolCallTiming,
     },
+    voice::VoiceReplyOrchestrator,
 };
 
 const MAX_PLANNED_TOOL_CALLS: usize = 6;
@@ -592,7 +594,7 @@ impl DefaultChatOrchestrator {
                 "tool call selected by unified planner"
             );
 
-            let tool_result = match self.tools.execute(&tool_name, args.clone()).await {
+            let tool_result = match self.tools.execute(&tool_name, args.clone(), ctx).await {
                 Ok(result) => result,
                 Err(error) => {
                     let error_text = error.to_string();
@@ -793,6 +795,14 @@ impl DefaultChatOrchestrator {
     }
 }
 
+#[async_trait]
+impl VoiceReplyOrchestrator for DefaultChatOrchestrator {
+    async fn handle_voice_transcript(&self, message: MessageCtx) -> anyhow::Result<String> {
+        let reply = self.handle_message(message).await?;
+        Ok(reply.text)
+    }
+}
+
 fn build_unified_planner_prompt(memory: &crate::types::MemoryContext) -> String {
     let context_block = build_planner_context_block(memory);
 
@@ -902,6 +912,30 @@ fn build_tool_inventory_for_planner() -> &'static str {
     },
     "when_to_use": "Need external factual information, latest/current info, or web-sourced recommendations.",
     "when_not_to_use": "Casual chat, personal memory recall, or when the answer can be provided from context."
+  },
+  {
+    "tool_name": "discord_voice_join",
+    "args_schema": {
+      "channel_id": "string Discord channel id (optional; defaults to requester's current voice channel)"
+    },
+    "when_to_use": "User explicitly asks the assistant to join voice.",
+    "when_not_to_use": "User did not request voice channel participation."
+  },
+  {
+    "tool_name": "discord_voice_listen_turn",
+    "args_schema": {
+      "listen_window_ms": "integer 1000-60000 (optional, default 12000)",
+      "chunk_gap_ms": "integer 100-3000 (optional, default 700)",
+      "max_turn_ms": "integer >= chunk_gap_ms (optional, default 12000)"
+    },
+    "when_to_use": "Bot is already in voice and user requests a listen/respond voice turn.",
+    "when_not_to_use": "Bot is not in voice or user requested text-only response."
+  },
+  {
+    "tool_name": "discord_voice_leave",
+    "args_schema": {},
+    "when_to_use": "User explicitly asks assistant to leave voice or stop voice interaction.",
+    "when_not_to_use": "Bot is not connected to voice."
   }
 ]"#
 }
@@ -959,6 +993,57 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
                         "query": query,
                         "max_results": max_results
                     }),
+                });
+            }
+            "discord_voice_join" => {
+                let channel_id = planned_call
+                    .args
+                    .get("channel_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let args = match channel_id {
+                    Some(channel_id) => json!({ "channel_id": channel_id }),
+                    None => json!({}),
+                };
+                sanitized_calls.push(ToolCall {
+                    tool_name: "discord_voice_join".to_owned(),
+                    args,
+                });
+            }
+            "discord_voice_listen_turn" => {
+                let listen_window_ms = planned_call
+                    .args
+                    .get("listen_window_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(12_000)
+                    .clamp(1_000, 60_000);
+                let chunk_gap_ms = planned_call
+                    .args
+                    .get("chunk_gap_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(700)
+                    .clamp(100, 3_000);
+                let max_turn_ms = planned_call
+                    .args
+                    .get("max_turn_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(12_000)
+                    .max(chunk_gap_ms);
+
+                sanitized_calls.push(ToolCall {
+                    tool_name: "discord_voice_listen_turn".to_owned(),
+                    args: json!({
+                        "listen_window_ms": listen_window_ms,
+                        "chunk_gap_ms": chunk_gap_ms,
+                        "max_turn_ms": max_turn_ms
+                    }),
+                });
+            }
+            "discord_voice_leave" => {
+                sanitized_calls.push(ToolCall {
+                    tool_name: "discord_voice_leave".to_owned(),
+                    args: json!({}),
                 });
             }
             other => {
@@ -1347,7 +1432,12 @@ mod tests {
 
     #[async_trait]
     impl ToolExecutor for StubWebSearchToolExecutor {
-        async fn execute(&self, tool_name: &str, args: Value) -> anyhow::Result<ToolResult> {
+        async fn execute(
+            &self,
+            tool_name: &str,
+            args: Value,
+            _message_ctx: &MessageCtx,
+        ) -> anyhow::Result<ToolResult> {
             if tool_name != "web_search" {
                 return Err(anyhow::anyhow!("unknown tool: {tool_name}"));
             }
@@ -1650,6 +1740,35 @@ mod tests {
         assert_eq!(sanitized.len(), 1);
         assert_eq!(sanitized[0].tool_name, "spotify_playing_status");
         assert_eq!(sanitized[0].args, json!({}));
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_allows_discord_voice_tools() {
+        let planned_calls = vec![
+            PlannedToolCall {
+                tool_name: "discord_voice_join".to_owned(),
+                args: json!({"channel_id":"123"}),
+            },
+            PlannedToolCall {
+                tool_name: "discord_voice_listen_turn".to_owned(),
+                args: json!({
+                    "listen_window_ms": 15000,
+                    "chunk_gap_ms": 600,
+                    "max_turn_ms": 20000
+                }),
+            },
+            PlannedToolCall {
+                tool_name: "discord_voice_leave".to_owned(),
+                args: json!({}),
+            },
+        ];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 3);
+        assert_eq!(sanitized[0].tool_name, "discord_voice_join");
+        assert_eq!(sanitized[0].args["channel_id"], "123");
+        assert_eq!(sanitized[1].tool_name, "discord_voice_listen_turn");
+        assert_eq!(sanitized[2].tool_name, "discord_voice_leave");
     }
 
     #[test]

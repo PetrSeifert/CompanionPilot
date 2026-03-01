@@ -12,6 +12,7 @@ use companionpilot_core::{
         CurrentDateTimeTool, SpotifyPlayingStatusTool, TavilyWebSearchTool, ToolExecutor,
         ToolRegistry,
     },
+    voice::{VoiceManager, VoiceRuntimeConfig},
 };
 use tokio::net::TcpListener;
 use tracing::{info, warn};
@@ -25,7 +26,8 @@ async fn main() -> anyhow::Result<()> {
 
     let model = build_model_provider(&config);
     let memory = build_memory_store(&config).await?;
-    let tools = build_tools(&config);
+    let voice = build_voice_manager(&config);
+    let tools = build_tools(&config, voice.clone());
 
     let memory_for_dashboard = memory.clone();
     let orchestrator = Arc::new(DefaultChatOrchestrator::new(
@@ -34,12 +36,18 @@ async fn main() -> anyhow::Result<()> {
         tools,
         SafetyPolicy::default(),
     ));
+    if let Some(voice_manager) = &voice {
+        voice_manager.set_orchestrator(orchestrator.clone()).await;
+        voice_manager.start_idle_reaper();
+    }
 
     if let Some(discord_token) = config.discord_token.clone() {
         let discord_orchestrator = orchestrator.clone();
+        let discord_voice = voice.clone();
         tokio::spawn(async move {
             if let Err(error) =
-                discord_bot::start_discord_bot(discord_token, discord_orchestrator).await
+                discord_bot::start_discord_bot(discord_token, discord_orchestrator, discord_voice)
+                    .await
             {
                 warn!(?error, "Discord bot stopped with error");
             }
@@ -138,7 +146,7 @@ async fn build_memory_store(config: &AppConfig) -> anyhow::Result<Arc<dyn Memory
     }
 }
 
-fn build_tools(config: &AppConfig) -> Arc<dyn ToolExecutor> {
+fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn ToolExecutor> {
     let web_search = config
         .tavily_api_key
         .as_ref()
@@ -152,5 +160,36 @@ fn build_tools(config: &AppConfig) -> Arc<dyn ToolExecutor> {
         current_datetime: CurrentDateTimeTool,
         spotify_playing_status: SpotifyPlayingStatusTool::default(),
         web_search,
+        voice,
     })
+}
+
+fn build_voice_manager(config: &AppConfig) -> Option<Arc<VoiceManager>> {
+    if !config.voice_enabled {
+        return None;
+    }
+
+    let Some(openai_api_key) = config.openai_api_key.clone() else {
+        warn!("VOICE_ENABLED is true but OPENAI_API_KEY is missing; voice is disabled");
+        return None;
+    };
+
+    let allowlist = VoiceRuntimeConfig::parse_allowlist(&config.voice_allowlist);
+    if allowlist.is_empty() {
+        warn!(
+            "VOICE_ENABLED is true but VOICE_ALLOWLIST has no valid guild:channel entries; voice tools will fail until configured"
+        );
+    }
+
+    Some(VoiceManager::new(VoiceRuntimeConfig {
+        openai_api_key,
+        stt_model: config.openai_stt_model.clone(),
+        tts_model: config.openai_tts_model.clone(),
+        tts_voice: config.openai_tts_voice.clone(),
+        allowlist,
+        idle_timeout: std::time::Duration::from_secs(config.voice_idle_timeout_sec),
+        default_chunk_gap: std::time::Duration::from_millis(config.voice_chunk_gap_ms),
+        default_listen_window: std::time::Duration::from_millis(config.voice_listen_window_ms),
+        default_max_turn: std::time::Duration::from_millis(config.voice_max_turn_ms),
+    }))
 }

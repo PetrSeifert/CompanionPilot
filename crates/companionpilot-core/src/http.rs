@@ -78,10 +78,7 @@ pub fn router(state: AppState) -> Router {
             "/api/users/{user_id}/facts",
             get(api_list_facts).delete(api_clear_facts),
         )
-        .route(
-            "/api/users/{user_id}/facts/{key}",
-            delete(api_delete_fact),
-        )
+        .route("/api/users/{user_id}/facts/{key}", delete(api_delete_fact))
         .route(
             "/api/users/{user_id}/tool-calls",
             get(api_list_tool_calls).delete(api_clear_tool_calls),
@@ -103,7 +100,10 @@ async fn health() -> &'static str {
 }
 
 async fn dashboard() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], DASHBOARD_HTML)
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        DASHBOARD_HTML,
+    )
 }
 
 async fn chat(
