@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -17,7 +18,7 @@ use serenity::all::{ChannelId, GuildId};
 use songbird::{
     Config as SongbirdConfig, Songbird,
     driver::DecodeMode,
-    events::{CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler},
+    events::{CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler, TrackEvent},
     tracks::PlayMode,
 };
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -98,6 +99,8 @@ struct VoiceSession {
     queue_notify: Notify,
     listen_lock: Mutex<()>,
     last_activity: Mutex<Instant>,
+    closed: AtomicBool,
+    tts_playing: AtomicBool,
 }
 
 impl VoiceSession {
@@ -108,6 +111,8 @@ impl VoiceSession {
             queue_notify: Notify::new(),
             listen_lock: Mutex::new(()),
             last_activity: Mutex::new(Instant::now()),
+            closed: AtomicBool::new(false),
+            tts_playing: AtomicBool::new(false),
         }
     }
 
@@ -119,20 +124,39 @@ impl VoiceSession {
         self.last_activity.lock().await.elapsed()
     }
 
+    fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.queue_notify.notify_waiters();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
+    fn set_tts_playing(&self, value: bool) {
+        self.tts_playing.store(value, Ordering::Relaxed);
+    }
+
     async fn clear_chunks(&self) {
         self.chunk_queue.lock().await.clear();
     }
 
     async fn push_chunk(&self, chunk: AudioChunk) {
+        if self.is_closed() || self.tts_playing.load(Ordering::Relaxed) {
+            return;
+        }
         self.chunk_queue.lock().await.push_back(chunk);
         self.touch().await;
         self.queue_notify.notify_waiters();
     }
 
-    async fn next_chunk(&self) -> AudioChunk {
+    async fn next_chunk(&self) -> anyhow::Result<AudioChunk> {
         loop {
+            if self.is_closed() {
+                anyhow::bail!("voice session closed");
+            }
             if let Some(chunk) = self.chunk_queue.lock().await.pop_front() {
-                return chunk;
+                return Ok(chunk);
             }
             self.queue_notify.notified().await;
         }
@@ -146,7 +170,7 @@ impl VoiceSession {
     ) -> anyhow::Result<CapturedTurn> {
         let first_chunk = tokio::time::timeout(listen_window, self.next_chunk())
             .await
-            .context("timed out waiting for next speaking event")?;
+            .context("timed out waiting for next speaking event")??;
 
         let turn_started_at = Instant::now();
         let mut speakers = HashSet::new();
@@ -166,6 +190,7 @@ impl VoiceSession {
             let Ok(next_chunk) = next_result else {
                 break;
             };
+            let next_chunk = next_chunk?;
 
             speakers.insert(next_chunk.speaker_label);
             pcm_samples.extend(next_chunk.pcm_samples);
@@ -210,6 +235,19 @@ impl VoiceEventHandler for VoiceReceiveHandler {
             }
         }
 
+        None
+    }
+}
+
+#[derive(Clone)]
+struct PlaybackFinishedHandler {
+    session: Arc<VoiceSession>,
+}
+
+#[async_trait]
+impl VoiceEventHandler for PlaybackFinishedHandler {
+    async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
+        self.session.set_tts_playing(false);
         None
     }
 }
@@ -296,7 +334,7 @@ impl VoiceManager {
     }
 
     pub async fn join_for_requester(
-        &self,
+        self: &Arc<Self>,
         guild_id_raw: &str,
         requester_user_id_raw: &str,
         args: &Value,
@@ -341,11 +379,21 @@ impl VoiceManager {
             );
         }
 
+        if let Some(previous) = self
+            .sessions
+            .write()
+            .await
+            .insert(guild_id, Arc::clone(&session))
+        {
+            previous.close();
+        }
         session.touch().await;
-        self.sessions.write().await.insert(guild_id, session);
+        self.spawn_auto_listen_loop(guild_id, Arc::clone(&session));
 
         info!(guild_id, channel_id, "voice join succeeded");
-        Ok(format!("Joined voice channel {channel_id}"))
+        Ok(format!(
+            "Joined voice channel {channel_id}. Natural voice listening is active."
+        ))
     }
 
     pub async fn leave_for_requester(
@@ -372,6 +420,7 @@ impl VoiceManager {
             .await
             .with_context(|| format!("failed to leave voice session in guild {guild_id}"))?;
 
+        session.close();
         self.sessions.write().await.remove(&guild_id);
         info!(guild_id, "voice session removed");
         Ok("Left the voice channel.".to_owned())
@@ -417,6 +466,30 @@ impl VoiceManager {
         let chunk_gap = Duration::from_millis(chunk_gap_ms);
         let max_turn = Duration::from_millis(max_turn_ms);
 
+        let transcript = self
+            .process_voice_turn(
+                guild_id,
+                Arc::clone(&session),
+                listen_window,
+                chunk_gap,
+                max_turn,
+            )
+            .await?;
+
+        let truncated_transcript = truncate_for_tool_result(&transcript, 220);
+        Ok(format!(
+            "Processed voice turn and replied in voice. Transcript: {truncated_transcript}"
+        ))
+    }
+
+    async fn process_voice_turn(
+        &self,
+        guild_id: u64,
+        session: Arc<VoiceSession>,
+        listen_window: Duration,
+        chunk_gap: Duration,
+        max_turn: Duration,
+    ) -> anyhow::Result<String> {
         let captured_turn = {
             let _listen_guard = session.listen_lock.lock().await;
             session.clear_chunks().await;
@@ -470,16 +543,62 @@ impl VoiceManager {
             .synthesize_mp3(&reply_for_tts)
             .await
             .context("TTS synthesis failed")?;
-        self.play_tts_audio(guild_id, tts_audio).await?;
+        self.play_tts_audio(guild_id, Arc::clone(&session), tts_audio)
+            .await?;
         session.touch().await;
 
-        let truncated_transcript = truncate_for_tool_result(transcript, 220);
-        Ok(format!(
-            "Processed voice turn and replied in voice. Transcript: {truncated_transcript}"
-        ))
+        Ok(transcript.to_owned())
     }
 
-    async fn play_tts_audio(&self, guild_id: u64, audio_bytes: Vec<u8>) -> anyhow::Result<()> {
+    fn spawn_auto_listen_loop(self: &Arc<Self>, guild_id: u64, session: Arc<VoiceSession>) {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            info!(guild_id, "automatic voice listening loop started");
+            loop {
+                if session.is_closed() {
+                    break;
+                }
+
+                let result = manager
+                    .process_voice_turn(
+                        guild_id,
+                        Arc::clone(&session),
+                        manager.config.default_listen_window,
+                        manager.config.default_chunk_gap,
+                        manager.config.default_max_turn,
+                    )
+                    .await;
+
+                match result {
+                    Ok(transcript) => {
+                        info!(
+                            guild_id,
+                            transcript = %truncate_for_tool_result(&transcript, 180),
+                            "automatic voice turn completed"
+                        );
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if message.contains("timed out waiting for next speaking event")
+                            || message.contains("voice session closed")
+                        {
+                            continue;
+                        }
+                        warn!(guild_id, ?error, "automatic voice turn failed");
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                    }
+                }
+            }
+            info!(guild_id, "automatic voice listening loop stopped");
+        });
+    }
+
+    async fn play_tts_audio(
+        &self,
+        guild_id: u64,
+        session: Arc<VoiceSession>,
+        audio_bytes: Vec<u8>,
+    ) -> anyhow::Result<()> {
         if audio_bytes.len() < 64 {
             anyhow::bail!(
                 "TTS response was unexpectedly small ({} bytes)",
@@ -493,7 +612,24 @@ impl VoiceManager {
             .get(GuildId::new(guild_id))
             .context("bot is no longer connected to voice")?;
         let mut handler = handler_lock.lock().await;
+        session.set_tts_playing(true);
         let track = handler.play_input(audio_bytes.into());
+        track
+            .add_event(
+                Event::Track(TrackEvent::End),
+                PlaybackFinishedHandler {
+                    session: Arc::clone(&session),
+                },
+            )
+            .context("failed to attach tts track end event")?;
+        track
+            .add_event(
+                Event::Track(TrackEvent::Error),
+                PlaybackFinishedHandler {
+                    session: Arc::clone(&session),
+                },
+            )
+            .context("failed to attach tts track error event")?;
 
         // Give Songbird a short window to parse/decode and report any immediate track error.
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -503,9 +639,11 @@ impl VoiceManager {
             .context("unable to query Songbird track state after enqueue")?;
         match state.playing {
             PlayMode::Errored(error) => {
+                session.set_tts_playing(false);
                 anyhow::bail!("Songbird playback error: {error:?} (audio_magic={audio_magic})")
             }
             PlayMode::End => {
+                session.set_tts_playing(false);
                 warn!(
                     guild_id,
                     audio_magic = %audio_magic,
@@ -555,7 +693,9 @@ impl VoiceManager {
 
         let mut sessions = self.sessions.write().await;
         for guild_id in stale_guilds {
-            sessions.remove(&guild_id);
+            if let Some(session) = sessions.remove(&guild_id) {
+                session.close();
+            }
             info!(guild_id, "idle voice session removed");
         }
 
