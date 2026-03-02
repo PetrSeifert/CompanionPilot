@@ -19,8 +19,6 @@ use crate::{
     voice::VoiceReplyOrchestrator,
 };
 
-const MAX_PLANNED_TOOL_CALLS: usize = 6;
-const MAX_TOOL_DECISION_ROUNDS: usize = 3;
 const SLOW_REPLY_THRESHOLD_MS: u64 = 30_000;
 
 pub struct DefaultChatOrchestrator {
@@ -226,15 +224,6 @@ impl DefaultChatOrchestrator {
                 &mut tool_timings,
             )
             .await;
-
-            if tool_round >= MAX_TOOL_DECISION_ROUNDS {
-                debug!(
-                    user_id = %ctx.user_id,
-                    tool_round,
-                    "tool planning rounds limit reached; forcing final synthesis"
-                );
-                break;
-            }
 
             let followup_started_at = Instant::now();
             let followup_decision = self
@@ -1023,9 +1012,6 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
     let mut sanitized_calls = Vec::new();
 
     for planned_call in planned_calls {
-        if sanitized_calls.len() >= MAX_PLANNED_TOOL_CALLS {
-            break;
-        }
         match planned_call.tool_name.as_str() {
             "current_datetime" => {
                 sanitized_calls.push(ToolCall {
@@ -1995,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_planned_tool_calls_drops_unknown_and_limits_to_max() {
+    fn sanitize_planned_tool_calls_drops_unknown_without_limiting_count() {
         let mut planned_calls = Vec::new();
         planned_calls.push(PlannedToolCall {
             tool_name: "unknown_tool".to_owned(),
@@ -2013,9 +1999,9 @@ mod tests {
         }
 
         let sanitized = sanitize_planned_tool_calls(planned_calls);
-        assert_eq!(sanitized.len(), 6);
+        assert_eq!(sanitized.len(), 8);
         assert_eq!(sanitized[0].tool_name, "web_search");
-        assert_eq!(sanitized[5].tool_name, "web_search");
+        assert_eq!(sanitized[7].tool_name, "web_search");
     }
 
     #[test]
