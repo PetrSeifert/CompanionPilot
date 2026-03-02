@@ -1,3 +1,6 @@
+FROM golang:1.24-bookworm AS spogo-builder
+RUN CGO_ENABLED=0 go install github.com/steipete/spogo/cmd/spogo@latest
+
 FROM rust:1.88-slim AS builder
 WORKDIR /app
 
@@ -18,6 +21,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/companionpilot /usr/local/bin/companionpilot
+COPY --from=spogo-builder /go/bin/spogo /usr/local/bin/spogo
 
 ENV RUST_LOG=info
 CMD ["companionpilot"]

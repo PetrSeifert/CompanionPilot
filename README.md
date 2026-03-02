@@ -15,10 +15,9 @@ Workspace layout:
 - Memory abstraction (`PostgresMemoryStore`, `InMemoryMemoryStore`)
 - Tool runtime with Tavily web search support
 - Built-in `current_datetime` tool for UTC date/time grounding
-- Built-in `spotify_playing_status` tool for current Spotify playback
-- Built-in `spotify_control_playback` tool for remote Spotify playback control
-- Built-in `spotify_search` tool for Spotify catalog search via PeterRock API
-- Built-in `spotify_users_list` tool for tracked Spotify user discovery
+- Built-in `spogo_status` tool for current Spotify playback (shared account)
+- Built-in `spogo_control` tool for Spotify playback control via local `spogo` CLI
+- Built-in `spogo_search` tool for Spotify catalog search via local `spogo` CLI
 - HTTP API for health and chat (`axum`)
 - Reply timing telemetry (planner/tools/model/memory stage durations)
 - Local dev infra (`docker-compose` with Postgres + Redis)
@@ -74,15 +73,29 @@ curl -X POST http://localhost:8080/chat \
 - Mention the bot or DM it.
 - CompanionPilot decides tool usage automatically from a unified planner decision.
 - For time-sensitive requests, planner can call `current_datetime` before `web_search`.
-- For Spotify playback requests, planner can call `spotify_playing_status`.
-- For Spotify playback control requests, planner can call `spotify_control_playback` with `user_id` + action-specific args.
-- For Spotify catalog lookup requests, planner can call `spotify_search` with `q` + `type` and optional Spotify Search API filters.
-- For Spotify playback control discovery, planner can call `spotify_users_list` to retrieve available `user_id` values.
+- For Spotify playback status requests, planner can call `spogo_status`.
+- For Spotify playback control requests, planner can call `spogo_control` with action-specific args.
+- For Spotify catalog lookup requests, planner can call `spogo_search` with `q` + `type` and optional CLI-native filters.
 - Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 - Short-term memory is injected from recent channel turns, even when no long-term fact is stored.
 - Voice mode is optional and tool-call driven: configure `VOICE_ENABLED=true`, `VOICE_ALLOWLIST`, and `OPENAI_API_KEY` to allow AI-planned `discord_voice_join`, `discord_voice_listen_turn`, and `discord_voice_leave`.
 - After `discord_voice_join`, CompanionPilot now listens continuously for natural voice turns (no text trigger required), runs STT, and replies in voice with TTS while persisting transcript/reply to memory/dashboard.
+
+## Spogo setup (Spotify tools)
+
+- Spotify control/search/status requires `spogo` in the runtime image (included by `Dockerfile`).
+- Configure:
+  - `SPOGO_BIN_PATH` (default `/usr/local/bin/spogo`)
+  - `SPOGO_CONFIG_DIR` (default `/data/spogo`, should be a Railway volume mount)
+  - `SPOGO_TIMEOUT_MS` (default `8000`)
+  - `SPOGO_ACCOUNT_LABEL` (optional label shown in tool responses)
+- Use a persistent Railway volume for `SPOGO_CONFIG_DIR` so auth/session data survives restarts and deploys.
+- Import Spotify auth into the mounted config path before using tools, for example:
+
+```bash
+spogo --config /data/spogo/config.toml auth import --cookie-path /path/to/cookies.txt
+```
 
 ## Model provider selection
 
@@ -104,9 +117,7 @@ OpenRouter settings:
 - If `OPENROUTER_API_KEY` is missing (or provider is `mock`), the app uses the mock model provider.
 - If `DATABASE_URL` is missing, memory uses in-process storage.
 - If `TAVILY_API_KEY` is missing, planner-selected `web_search` calls return a configuration error.
-- If `SPOTIFY_ADMIN_TOKEN` is missing, planner-selected `spotify_control_playback` calls return a configuration error.
-- `spotify_search` calls `GET /api/spotify/search` without admin auth by default.
-- `spotify_users_list` calls `GET /api/spotify/users` without auth by default.
+- Spotify tool calls use local `spogo` CLI execution with fail-fast error propagation.
 - HTTP endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
 
 ## Search diagnostics
@@ -122,7 +133,8 @@ Then look for:
 - `tool call selected by unified planner` (tool + args selected)
 - `tool call completed` (tool finished)
 - `tavily web search start` / `tavily web search success` (actual Tavily call path)
-- `spotify search request start` (actual Spotify search call path)
+- `spogo search request start` (actual spogo search call path)
+- `spogo command start` / `spogo command failed` (CLI invocation path)
 - `planner fallback: running without tools and without memory write` (planner failure fallback)
 - `reply completed` (per-message timing summary)
 - `slow reply detected` / `slow Discord reply detected` (slow-path warnings, threshold 30s)

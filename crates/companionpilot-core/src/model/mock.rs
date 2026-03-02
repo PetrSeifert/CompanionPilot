@@ -37,12 +37,12 @@ impl ModelProvider for MockModelProvider {
             };
 
             let mut tool_calls = Vec::new();
-            if let Some(query) = extract_spotify_search_query(&request.user_prompt) {
+            if let Some(query) = extract_spogo_search_query(&request.user_prompt) {
                 tool_calls.push(json!({
-                    "tool_name": "spotify_search",
+                    "tool_name": "spogo_search",
                     "args": {
                         "q": query,
-                        "type": "track,artist",
+                        "type": "track",
                         "limit": 5
                     }
                 }));
@@ -133,7 +133,7 @@ fn extract_search_query(input: &str) -> Option<String> {
     }
 }
 
-fn extract_spotify_search_query(input: &str) -> Option<String> {
+fn extract_spogo_search_query(input: &str) -> Option<String> {
     let lowered = input.to_lowercase();
 
     let query = if let Some(index) = lowered.find("search spotify for ") {

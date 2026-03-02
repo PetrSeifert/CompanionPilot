@@ -1,8 +1,8 @@
 mod current_datetime;
-mod spotify_control_playback;
-mod spotify_playing_status;
-mod spotify_search;
-mod spotify_users_list;
+mod spogo_cli;
+mod spogo_control;
+mod spogo_search;
+mod spogo_status;
 mod web_search;
 
 use std::sync::Arc;
@@ -13,10 +13,10 @@ use serde_json::Value;
 use crate::{types::MessageCtx, voice::VoiceManager};
 
 pub use current_datetime::CurrentDateTimeTool;
-pub use spotify_control_playback::{DEFAULT_SPOTIFY_CONTROL_BASE_URL, SpotifyControlPlaybackTool};
-pub use spotify_playing_status::SpotifyPlayingStatusTool;
-pub use spotify_search::{DEFAULT_SPOTIFY_SEARCH_API_URL, SpotifySearchTool};
-pub use spotify_users_list::{DEFAULT_SPOTIFY_USERS_API_URL, SpotifyUsersListTool};
+pub use spogo_cli::{DEFAULT_SPOGO_BIN_PATH, DEFAULT_SPOGO_TIMEOUT_MS, SpogoCli};
+pub use spogo_control::SpogoControlTool;
+pub use spogo_search::SpogoSearchTool;
+pub use spogo_status::SpogoStatusTool;
 pub use web_search::TavilyWebSearchTool;
 
 #[derive(Debug, Clone)]
@@ -38,10 +38,9 @@ pub trait ToolExecutor: Send + Sync {
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
     pub current_datetime: CurrentDateTimeTool,
-    pub spotify_control_playback: Option<SpotifyControlPlaybackTool>,
-    pub spotify_playing_status: SpotifyPlayingStatusTool,
-    pub spotify_search: SpotifySearchTool,
-    pub spotify_users_list: SpotifyUsersListTool,
+    pub spogo_control: SpogoControlTool,
+    pub spogo_status: SpogoStatusTool,
+    pub spogo_search: SpogoSearchTool,
     pub web_search: Option<TavilyWebSearchTool>,
     pub voice: Option<Arc<VoiceManager>>,
 }
@@ -56,15 +55,9 @@ impl ToolExecutor for ToolRegistry {
     ) -> anyhow::Result<ToolResult> {
         match tool_name {
             "current_datetime" => self.current_datetime.get_now(args).await,
-            "spotify_control_playback" => {
-                let tool = self.spotify_control_playback.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("spotify_control_playback tool is not configured")
-                })?;
-                tool.control_playback(args).await
-            }
-            "spotify_playing_status" => self.spotify_playing_status.get_playing_status(args).await,
-            "spotify_search" => self.spotify_search.search(args).await,
-            "spotify_users_list" => self.spotify_users_list.list_users(args).await,
+            "spogo_control" => self.spogo_control.control(args).await,
+            "spogo_status" => self.spogo_status.get_status(args).await,
+            "spogo_search" => self.spogo_search.search(args).await,
             "web_search" => {
                 let tool = self
                     .web_search

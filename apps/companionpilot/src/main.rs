@@ -9,8 +9,8 @@ use companionpilot_core::{
     orchestrator::DefaultChatOrchestrator,
     safety::SafetyPolicy,
     tools::{
-        CurrentDateTimeTool, SpotifyControlPlaybackTool, SpotifyPlayingStatusTool,
-        SpotifySearchTool, SpotifyUsersListTool, TavilyWebSearchTool, ToolExecutor, ToolRegistry,
+        CurrentDateTimeTool, SpogoCli, SpogoControlTool, SpogoSearchTool, SpogoStatusTool,
+        TavilyWebSearchTool, ToolExecutor, ToolRegistry,
     },
     voice::{VoiceManager, VoiceRuntimeConfig},
 };
@@ -151,30 +151,28 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
         .tavily_api_key
         .as_ref()
         .map(|key| TavilyWebSearchTool::new(key.clone()));
-    let spotify_control_playback = config.spotify_admin_token.as_ref().map(|token| {
-        SpotifyControlPlaybackTool::new(config.spotify_control_api_base_url.clone(), token.clone())
-    });
-    let spotify_search = SpotifySearchTool::new(config.spotify_search_api_url.clone());
-    let spotify_users_list = SpotifyUsersListTool::new(
-        config.spotify_users_api_url.clone(),
-        config.spotify_admin_token.clone(),
+    let spogo_cli = SpogoCli::new(
+        config.spogo_bin_path.clone(),
+        config.spogo_config_dir.clone(),
+        config.spogo_timeout_ms,
     );
+    let spogo_control =
+        SpogoControlTool::new(spogo_cli.clone(), config.spogo_account_label.clone());
+    let spogo_status = SpogoStatusTool::new(spogo_cli.clone(), config.spogo_account_label.clone());
+    let spogo_search = SpogoSearchTool::new(spogo_cli);
 
     if web_search.is_none() {
         warn!("TAVILY_API_KEY not set; planner-selected web_search calls will fail");
     }
-    if spotify_control_playback.is_none() {
-        warn!(
-            "SPOTIFY_ADMIN_TOKEN not set; planner-selected spotify_control_playback calls will fail"
-        );
+    if config.spogo_config_dir.trim().is_empty() {
+        warn!("SPOGO_CONFIG_DIR is empty; planner-selected spogo tool calls will fail");
     }
 
     Arc::new(ToolRegistry {
         current_datetime: CurrentDateTimeTool,
-        spotify_control_playback,
-        spotify_playing_status: SpotifyPlayingStatusTool::default(),
-        spotify_search,
-        spotify_users_list,
+        spogo_control,
+        spogo_status,
+        spogo_search,
         web_search,
         voice,
     })
