@@ -270,10 +270,6 @@ impl MemoryStore for PostgresMemoryStore {
             .bind(user_id)
             .execute(&self.pool)
             .await?;
-        sqlx::query("DELETE FROM message_latency_logs WHERE user_id = $1")
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
         Ok(result.rows_affected())
     }
 

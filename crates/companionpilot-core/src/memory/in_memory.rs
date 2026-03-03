@@ -193,7 +193,6 @@ impl MemoryStore for InMemoryMemoryStore {
 
     async fn clear_chat_messages(&self, user_id: &str) -> anyhow::Result<u64> {
         let mut chats = self.chats.write().await;
-        self.message_latencies.write().await.remove(user_id);
         let removed = chats
             .remove(user_id)
             .map(|list| list.len() as u64)
@@ -400,7 +399,7 @@ mod tests {
 
     use crate::{
         memory::MemoryStore,
-        types::{ChatMessageRecord, ChatRole, MemoryFact},
+        types::{ChatMessageRecord, ChatRole, MemoryFact, MessageLatencyRecord},
     };
 
     use super::{InMemoryMemoryStore, MAX_CHAT_MESSAGES_PER_USER, MAX_FACTS_PER_USER};
@@ -459,5 +458,50 @@ mod tests {
         assert_eq!(facts.len(), MAX_FACTS_PER_USER);
         assert!(!facts.iter().any(|entry| entry.key == "key-0"));
         assert!(!facts.iter().any(|entry| entry.key == "key-1"));
+    }
+
+    #[tokio::test]
+    async fn clear_chat_messages_does_not_clear_message_latencies() {
+        let store = InMemoryMemoryStore::default();
+        let now = Utc::now();
+        store
+            .record_chat_message(ChatMessageRecord {
+                id: "m1".to_owned(),
+                user_id: "u1".to_owned(),
+                guild_id: "g1".to_owned(),
+                channel_id: "c1".to_owned(),
+                role: ChatRole::User,
+                content: "hello".to_owned(),
+                timestamp: now,
+            })
+            .await
+            .expect("chat message should record");
+        store
+            .record_message_latency(MessageLatencyRecord {
+                user_id: "u1".to_owned(),
+                guild_id: "g1".to_owned(),
+                channel_id: "c1".to_owned(),
+                message_id: "m1".to_owned(),
+                stt_ms: Some(10),
+                tts_ms: None,
+                final_response_ms: 100,
+                decision_ms: 20,
+                tool_call_ms: 30,
+                timestamp: now,
+            })
+            .await
+            .expect("latency should record");
+
+        store
+            .clear_chat_messages("u1")
+            .await
+            .expect("chat messages should clear");
+        let latencies = store
+            .list_message_latencies("u1", usize::MAX)
+            .await
+            .expect("latencies should list");
+
+        assert_eq!(latencies.len(), 1);
+        assert_eq!(latencies[0].message_id, "m1");
     }
 }
