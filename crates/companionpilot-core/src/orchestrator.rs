@@ -19,7 +19,7 @@ use crate::{
     voice::VoiceReplyOrchestrator,
 };
 
-const SLOW_REPLY_THRESHOLD_MS: u64 = 30_000;
+pub const SLOW_REPLY_THRESHOLD_MS: u64 = 30_000;
 
 pub struct DefaultChatOrchestrator {
     model: Arc<dyn ModelProvider>,

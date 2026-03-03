@@ -15,7 +15,8 @@ use songbird::{SerenityInit, Songbird};
 use tracing::{error, info, warn};
 
 use crate::{
-    orchestrator::DefaultChatOrchestrator, runtime_settings::RuntimeSettingsManager,
+    orchestrator::{DefaultChatOrchestrator, SLOW_REPLY_THRESHOLD_MS},
+    runtime_settings::RuntimeSettingsManager,
     types::MessageCtx, voice::VoiceManager,
 };
 
@@ -108,7 +109,7 @@ impl EventHandler for Handler {
 
         match self.orchestrator.handle_message(request).await {
             Ok(reply) => {
-                if reply.timings.total_ms >= 30_000 {
+                if reply.timings.total_ms >= SLOW_REPLY_THRESHOLD_MS {
                     warn!(
                         user_id = %msg.author.id,
                         channel_id = %msg.channel_id,
