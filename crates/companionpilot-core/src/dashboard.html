@@ -413,6 +413,91 @@ body::before {
   color: var(--bg-deep);
 }
 
+.toolbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-secondary,
+.btn-primary {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  background: transparent;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-secondary {
+  color: var(--text-secondary);
+  border: 1px solid var(--border-active);
+}
+
+.btn-secondary:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.btn-primary {
+  color: var(--amber);
+  border: 1px solid var(--amber-dim);
+}
+
+.btn-primary:hover {
+  color: var(--bg-deep);
+  background: var(--amber);
+}
+
+#settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-field-wide {
+  grid-column: 1 / -1;
+}
+
+.settings-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 1.5px;
+  color: var(--text-faint);
+}
+
+.settings-field input,
+.settings-field select {
+  width: 100%;
+  background: var(--bg-recessed);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  padding: 8px 10px;
+}
+
+.settings-field input:focus,
+.settings-field select:focus {
+  outline: none;
+  border-color: var(--amber-dim);
+  box-shadow: 0 0 0 1px var(--amber-glow);
+}
+
+.settings-note {
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
 /* ===== EMPTY STATE ===== */
 .empty-state {
   display: flex;
@@ -1115,6 +1200,9 @@ pre.json-block {
 
   .exp-card-header { padding: 8px 10px; gap: 6px; }
   .exp-card-name { font-size: 0.75rem; }
+  #settings-form-grid { grid-template-columns: 1fr; }
+  .panel-toolbar { align-items: flex-start; gap: 8px; }
+  .toolbar-actions { flex-wrap: wrap; }
 }
 </style>
 </head>
@@ -1169,6 +1257,7 @@ pre.json-block {
         <button class="tab-btn" data-tab="facts">Facts</button>
         <button class="tab-btn" data-tab="tools">Tools</button>
         <button class="tab-btn" data-tab="decisions">Decisions</button>
+        <button class="tab-btn" data-tab="settings">Settings</button>
       </div>
 
       <!-- TAB CONTENT -->
@@ -1258,6 +1347,66 @@ pre.json-block {
             </div>
           </div>
         </div>
+
+        <!-- SETTINGS PANEL -->
+        <div class="tab-panel" id="panel-settings">
+          <div id="settings-loaded">
+            <div class="panel-toolbar">
+              <div class="panel-title">RUNTIME SETTINGS</div>
+              <div class="toolbar-actions">
+                <button class="btn-secondary" id="settings-reload">RELOAD</button>
+                <button class="btn-primary" id="settings-save">SAVE</button>
+              </div>
+            </div>
+            <div id="settings-form-grid">
+              <label class="settings-field">
+                <span class="settings-label">MODEL_PROVIDER</span>
+                <select id="settings-model-provider">
+                  <option value="auto">auto</option>
+                  <option value="openrouter">openrouter</option>
+                  <option value="mock">mock</option>
+                </select>
+              </label>
+              <label class="settings-field">
+                <span class="settings-label">OPENROUTER_MODEL</span>
+                <input id="settings-openrouter-model" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span class="settings-label">OPENAI_STT_MODEL</span>
+                <input id="settings-openai-stt-model" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span class="settings-label">OPENAI_TTS_MODEL</span>
+                <input id="settings-openai-tts-model" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span class="settings-label">OPENAI_TTS_VOICE</span>
+                <input id="settings-openai-tts-voice" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field settings-field-wide">
+                <span class="settings-label">VOICE_ALLOWLIST</span>
+                <input id="settings-voice-allowlist" type="text" placeholder="guild_id:channel_id,guild_id:channel_id">
+              </label>
+              <label class="settings-field">
+                <span class="settings-label">VOICE_IDLE_TIMEOUT_SEC</span>
+                <input id="settings-voice-idle-timeout-sec" type="number" min="0" step="1">
+              </label>
+              <label class="settings-field">
+                <span class="settings-label">VOICE_LISTEN_WINDOW_MS</span>
+                <input id="settings-voice-listen-window-ms" type="number" min="1" step="1">
+              </label>
+              <label class="settings-field">
+                <span class="settings-label">VOICE_CHUNK_GAP_MS</span>
+                <input id="settings-voice-chunk-gap-ms" type="number" min="1" step="1">
+              </label>
+              <label class="settings-field">
+                <span class="settings-label">VOICE_MAX_TURN_MS</span>
+                <input id="settings-voice-max-turn-ms" type="number" min="1" step="1">
+              </label>
+            </div>
+            <div class="settings-note">Changes are applied live and persisted by the server.</div>
+          </div>
+        </div>
       </div>
 
       <!-- COMPOSER -->
@@ -1285,6 +1434,7 @@ pre.json-block {
     msgToolCalls: [],
     msgDecisions: [],
     msgLatencies: [],
+    runtimeSettings: null,
     loading: false,
     modalResolve: null,
   };
@@ -1307,6 +1457,18 @@ pre.json-block {
   const modalMessage = $('#modal-message');
   const modalConfirm = $('#modal-confirm');
   const modalCancel = $('#modal-cancel');
+  const settingsReloadBtn = $('#settings-reload');
+  const settingsSaveBtn = $('#settings-save');
+  const settingsModelProvider = $('#settings-model-provider');
+  const settingsOpenRouterModel = $('#settings-openrouter-model');
+  const settingsOpenAiSttModel = $('#settings-openai-stt-model');
+  const settingsOpenAiTtsModel = $('#settings-openai-tts-model');
+  const settingsOpenAiTtsVoice = $('#settings-openai-tts-voice');
+  const settingsVoiceAllowlist = $('#settings-voice-allowlist');
+  const settingsVoiceIdleTimeoutSec = $('#settings-voice-idle-timeout-sec');
+  const settingsVoiceListenWindowMs = $('#settings-voice-listen-window-ms');
+  const settingsVoiceChunkGapMs = $('#settings-voice-chunk-gap-ms');
+  const settingsVoiceMaxTurnMs = $('#settings-voice-max-turn-ms');
 
   // ===== UTILITIES =====
 
@@ -1811,10 +1973,14 @@ pre.json-block {
   });
 
   async function loadTabData() {
+    const tab = state.activeTab;
+    if (tab === 'settings') {
+      await loadRuntimeSettings();
+      return;
+    }
+
     const uid = state.selectedUserId;
     if (!uid) return;
-
-    const tab = state.activeTab;
     const enc = encodeURIComponent(uid);
 
     // Show loaded containers, hide no-user states
@@ -2317,6 +2483,71 @@ pre.json-block {
     row.appendChild(val);
     return row;
   }
+
+  // ===== RUNTIME SETTINGS =====
+  async function loadRuntimeSettings() {
+    try {
+      state.runtimeSettings = await api('GET', '/api/runtime-settings');
+      renderRuntimeSettings();
+    } catch (e) { /* toast already shown */ }
+  }
+
+  function renderRuntimeSettings() {
+    const settings = state.runtimeSettings;
+    if (!settings) return;
+    settingsModelProvider.value = settings.model_provider || 'auto';
+    settingsOpenRouterModel.value = settings.openrouter_model || '';
+    settingsOpenAiSttModel.value = settings.openai_stt_model || '';
+    settingsOpenAiTtsModel.value = settings.openai_tts_model || '';
+    settingsOpenAiTtsVoice.value = settings.openai_tts_voice || '';
+    settingsVoiceAllowlist.value = settings.voice_allowlist || '';
+    settingsVoiceIdleTimeoutSec.value = settings.voice_idle_timeout_sec ?? 0;
+    settingsVoiceListenWindowMs.value = settings.voice_listen_window_ms ?? 0;
+    settingsVoiceChunkGapMs.value = settings.voice_chunk_gap_ms ?? 0;
+    settingsVoiceMaxTurnMs.value = settings.voice_max_turn_ms ?? 0;
+  }
+
+  function parseIntegerField(input, fieldName) {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value < 0 || Math.floor(value) !== value) {
+      throw new Error(fieldName + ' must be a non-negative integer');
+    }
+    return value;
+  }
+
+  async function saveRuntimeSettings() {
+    let payload;
+    try {
+      payload = {
+        model_provider: settingsModelProvider.value.trim().toLowerCase(),
+        openrouter_model: settingsOpenRouterModel.value.trim(),
+        openai_stt_model: settingsOpenAiSttModel.value.trim(),
+        openai_tts_model: settingsOpenAiTtsModel.value.trim(),
+        openai_tts_voice: settingsOpenAiTtsVoice.value.trim(),
+        voice_allowlist: settingsVoiceAllowlist.value.trim(),
+        voice_idle_timeout_sec: parseIntegerField(settingsVoiceIdleTimeoutSec, 'VOICE_IDLE_TIMEOUT_SEC'),
+        voice_listen_window_ms: parseIntegerField(settingsVoiceListenWindowMs, 'VOICE_LISTEN_WINDOW_MS'),
+        voice_chunk_gap_ms: parseIntegerField(settingsVoiceChunkGapMs, 'VOICE_CHUNK_GAP_MS'),
+        voice_max_turn_ms: parseIntegerField(settingsVoiceMaxTurnMs, 'VOICE_MAX_TURN_MS'),
+      };
+    } catch (error) {
+      toast(error.message);
+      return;
+    }
+
+    settingsSaveBtn.disabled = true;
+    try {
+      state.runtimeSettings = await api('PUT', '/api/runtime-settings', payload);
+      renderRuntimeSettings();
+      toast('Runtime settings saved', 'success');
+    } catch (e) { /* toast already shown */ }
+    finally {
+      settingsSaveBtn.disabled = false;
+    }
+  }
+
+  settingsReloadBtn.addEventListener('click', loadRuntimeSettings);
+  settingsSaveBtn.addEventListener('click', saveRuntimeSettings);
 
   // ===== PURGE HANDLERS =====
   $('#purge-messages').addEventListener('click', async () => {

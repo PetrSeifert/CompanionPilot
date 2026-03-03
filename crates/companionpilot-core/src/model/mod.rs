@@ -1,10 +1,12 @@
 mod mock;
 mod openrouter;
+mod runtime;
 
 use async_trait::async_trait;
 
 pub use mock::MockModelProvider;
 pub use openrouter::OpenRouterProvider;
+pub use runtime::RuntimeModelProvider;
 
 #[derive(Debug, Clone)]
 pub struct ModelRequest {

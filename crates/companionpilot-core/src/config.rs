@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub tavily_api_key: Option<String>,
     pub database_url: Option<String>,
     pub api_auth_token: Option<String>,
+    pub runtime_settings_path: String,
     pub voice_enabled: bool,
     pub voice_allowlist: String,
     pub voice_idle_timeout_sec: u64,
@@ -38,7 +39,8 @@ impl AppConfig {
         Ok(Self {
             http_bind,
             discord_token: env::var("DISCORD_TOKEN").ok(),
-            discord_allowed_channel_ids: env::var("DISCORD_ALLOWED_CHANNEL_IDS").unwrap_or_default(),
+            discord_allowed_channel_ids: env::var("DISCORD_ALLOWED_CHANNEL_IDS")
+                .unwrap_or_default(),
             model_provider: env::var("MODEL_PROVIDER").unwrap_or_else(|_| "auto".to_owned()),
             openrouter_api_key: env::var("OPENROUTER_API_KEY").ok(),
             openrouter_model: env::var("OPENROUTER_MODEL")
@@ -60,6 +62,8 @@ impl AppConfig {
             tavily_api_key: env::var("TAVILY_API_KEY").ok(),
             database_url: env::var("DATABASE_URL").ok(),
             api_auth_token: env::var("API_AUTH_TOKEN").ok(),
+            runtime_settings_path: env::var("RUNTIME_SETTINGS_PATH")
+                .unwrap_or_else(|_| "runtime_settings.json".to_owned()),
             voice_enabled: env_bool("VOICE_ENABLED", false),
             voice_allowlist: env::var("VOICE_ALLOWLIST").unwrap_or_default(),
             voice_idle_timeout_sec: env_u64("VOICE_IDLE_TIMEOUT_SEC", 300),

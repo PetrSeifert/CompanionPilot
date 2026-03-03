@@ -4,6 +4,7 @@ pub mod http;
 pub mod memory;
 pub mod model;
 pub mod orchestrator;
+pub mod runtime_settings;
 pub mod safety;
 pub mod tools;
 pub mod types;

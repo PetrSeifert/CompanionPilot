@@ -5,8 +5,8 @@ use axum::{
     extract::{Path, Query, State},
     http::{Request, StatusCode, header},
     middleware::{self, Next},
-    response::Response,
     response::IntoResponse,
+    response::Response,
     routing::{delete, get, post},
 };
 use chrono::Utc;
@@ -16,6 +16,7 @@ use tower_http::trace::TraceLayer;
 use crate::{
     memory::MemoryStore,
     orchestrator::DefaultChatOrchestrator,
+    runtime_settings::{RuntimeSettings, RuntimeSettingsManager, RuntimeSettingsUpdate},
     types::{MessageCtx, OrchestratorReply},
 };
 
@@ -25,6 +26,7 @@ static DASHBOARD_HTML: &str = include_str!("dashboard.html");
 pub struct AppState {
     pub orchestrator: Arc<DefaultChatOrchestrator>,
     pub memory: Arc<dyn MemoryStore>,
+    pub runtime_settings: Arc<RuntimeSettingsManager>,
     pub api_auth_token: Option<String>,
 }
 
@@ -70,6 +72,10 @@ pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/chat", post(chat))
         .route("/dashboard", get(dashboard))
+        .route(
+            "/api/runtime-settings",
+            get(api_get_runtime_settings).put(api_update_runtime_settings),
+        )
         .route("/api/users", get(api_list_users))
         .route(
             "/api/users/{user_id}/messages",
@@ -174,6 +180,29 @@ async fn chat(
 }
 
 // --- Dashboard API handlers ---
+
+async fn api_get_runtime_settings(
+    State(state): State<AppState>,
+) -> Result<Json<RuntimeSettings>, (axum::http::StatusCode, String)> {
+    Ok(Json(state.runtime_settings.get().await))
+}
+
+async fn api_update_runtime_settings(
+    State(state): State<AppState>,
+    Json(update): Json<RuntimeSettingsUpdate>,
+) -> Result<Json<RuntimeSettings>, (axum::http::StatusCode, String)> {
+    let updated = state
+        .runtime_settings
+        .update(update)
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("invalid runtime settings: {error}"),
+            )
+        })?;
+    Ok(Json(updated))
+}
 
 async fn api_list_users(
     State(state): State<AppState>,

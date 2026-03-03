@@ -26,6 +26,7 @@ use tracing::{info, warn};
 
 use crate::{
     memory::MemoryStore,
+    runtime_settings::RuntimeSettingsManager,
     types::{MessageCtx, MessageLatencyRecord},
 };
 
@@ -264,6 +265,7 @@ pub trait VoiceReplyOrchestrator: Send + Sync {
 
 pub struct VoiceManager {
     config: VoiceRuntimeConfig,
+    runtime_settings: Arc<RuntimeSettingsManager>,
     memory: Arc<dyn MemoryStore>,
     sessions: RwLock<HashMap<u64, Arc<VoiceSession>>>,
     user_voice_channels: RwLock<HashMap<(u64, u64), u64>>,
@@ -282,15 +284,15 @@ impl std::fmt::Debug for VoiceManager {
 }
 
 impl VoiceManager {
-    pub fn new(config: VoiceRuntimeConfig, memory: Arc<dyn MemoryStore>) -> Arc<Self> {
+    pub fn new(
+        config: VoiceRuntimeConfig,
+        runtime_settings: Arc<RuntimeSettingsManager>,
+        memory: Arc<dyn MemoryStore>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            openai: OpenAiAudioClient::new(
-                config.openai_api_key.clone(),
-                config.stt_model.clone(),
-                config.tts_model.clone(),
-                config.tts_voice.clone(),
-            ),
+            openai: OpenAiAudioClient::new(config.openai_api_key.clone()),
             config,
+            runtime_settings,
             memory,
             sessions: RwLock::new(HashMap::new()),
             user_voice_channels: RwLock::new(HashMap::new()),
@@ -361,7 +363,7 @@ impl VoiceManager {
                     .context("requesting user is not currently in a voice channel")?
             };
 
-        self.ensure_allowlisted(guild_id, channel_id)?;
+        self.ensure_allowlisted(guild_id, channel_id).await?;
 
         let songbird = self.songbird().await?;
         let guild_id_key = GuildId::new(guild_id);
@@ -451,22 +453,24 @@ impl VoiceManager {
 
         self.ensure_requester_in_channel(guild_id, requester_user_id, session.channel_id)
             .await?;
-        self.ensure_allowlisted(guild_id, session.channel_id)?;
+        self.ensure_allowlisted(guild_id, session.channel_id)
+            .await?;
 
+        let runtime_settings = self.runtime_settings.get().await;
         let listen_window_ms = args
             .get("listen_window_ms")
             .and_then(Value::as_u64)
-            .unwrap_or(self.config.default_listen_window.as_millis() as u64)
+            .unwrap_or(runtime_settings.voice_listen_window_ms)
             .clamp(MIN_LISTEN_WINDOW_MS, MAX_LISTEN_WINDOW_MS);
         let chunk_gap_ms = args
             .get("chunk_gap_ms")
             .and_then(Value::as_u64)
-            .unwrap_or(self.config.default_chunk_gap.as_millis() as u64)
+            .unwrap_or(runtime_settings.voice_chunk_gap_ms)
             .clamp(MIN_CHUNK_GAP_MS, MAX_CHUNK_GAP_MS);
         let max_turn_ms = args
             .get("max_turn_ms")
             .and_then(Value::as_u64)
-            .unwrap_or(self.config.default_max_turn.as_millis() as u64)
+            .unwrap_or(runtime_settings.voice_max_turn_ms)
             .max(chunk_gap_ms);
 
         let listen_window = Duration::from_millis(listen_window_ms);
@@ -509,10 +513,11 @@ impl VoiceManager {
 
         let turn_started_at = Instant::now();
         let stt_started_at = Instant::now();
+        let runtime_settings = self.runtime_settings.get().await;
         let wav_payload = pcm_i16_to_wav_bytes(&captured_turn.pcm_samples, 2, 48_000);
         let transcript = self
             .openai
-            .transcribe_wav(&wav_payload)
+            .transcribe_wav(&runtime_settings.openai_stt_model, &wav_payload)
             .await
             .context("STT transcription failed")?;
         let stt_ms = elapsed_ms(stt_started_at);
@@ -552,7 +557,11 @@ impl VoiceManager {
         let reply_for_tts = clamp_tts_input(&reply_text);
         let tts_audio = self
             .openai
-            .synthesize_mp3(&reply_for_tts)
+            .synthesize_mp3(
+                &runtime_settings.openai_tts_model,
+                &runtime_settings.openai_tts_voice,
+                &reply_for_tts,
+            )
             .await
             .context("TTS synthesis failed")?;
         self.play_tts_audio(guild_id, Arc::clone(&session), tts_audio)
@@ -590,14 +599,15 @@ impl VoiceManager {
                 if session.is_closed() {
                     break;
                 }
+                let runtime_settings = manager.runtime_settings.get().await;
 
                 let result = manager
                     .process_voice_turn(
                         guild_id,
                         Arc::clone(&session),
-                        manager.config.default_listen_window,
-                        manager.config.default_chunk_gap,
-                        manager.config.default_max_turn,
+                        Duration::from_millis(runtime_settings.voice_listen_window_ms),
+                        Duration::from_millis(runtime_settings.voice_chunk_gap_ms),
+                        Duration::from_millis(runtime_settings.voice_max_turn_ms),
                     )
                     .await;
 
@@ -694,7 +704,9 @@ impl VoiceManager {
     }
 
     async fn cleanup_idle_sessions(&self) -> anyhow::Result<()> {
-        if self.config.idle_timeout.is_zero() {
+        let runtime_settings = self.runtime_settings.get().await;
+        let idle_timeout = Duration::from_secs(runtime_settings.voice_idle_timeout_sec);
+        if idle_timeout.is_zero() {
             return Ok(());
         }
 
@@ -702,7 +714,7 @@ impl VoiceManager {
         {
             let sessions = self.sessions.read().await;
             for (guild_id, session) in sessions.iter() {
-                if session.elapsed_since_last_activity().await >= self.config.idle_timeout {
+                if session.elapsed_since_last_activity().await >= idle_timeout {
                     stale_guilds.push(*guild_id);
                 }
             }
@@ -761,11 +773,13 @@ impl VoiceManager {
         Ok(())
     }
 
-    fn ensure_allowlisted(&self, guild_id: u64, channel_id: u64) -> anyhow::Result<()> {
-        if self.config.allowlist.is_empty() {
+    async fn ensure_allowlisted(&self, guild_id: u64, channel_id: u64) -> anyhow::Result<()> {
+        let runtime_settings = self.runtime_settings.get().await;
+        let allowlist = VoiceRuntimeConfig::parse_allowlist(&runtime_settings.voice_allowlist);
+        if allowlist.is_empty() {
             anyhow::bail!("voice allowlist is empty; no channel is currently permitted");
         }
-        if !self.config.allowlist.contains(&(guild_id, channel_id)) {
+        if !allowlist.contains(&(guild_id, channel_id)) {
             anyhow::bail!("voice channel is not in configured allowlist");
         }
         Ok(())
@@ -776,23 +790,17 @@ impl VoiceManager {
 struct OpenAiAudioClient {
     client: Client,
     api_key: String,
-    stt_model: String,
-    tts_model: String,
-    tts_voice: String,
 }
 
 impl OpenAiAudioClient {
-    fn new(api_key: String, stt_model: String, tts_model: String, tts_voice: String) -> Self {
+    fn new(api_key: String) -> Self {
         Self {
             client: Client::new(),
             api_key,
-            stt_model,
-            tts_model,
-            tts_voice,
         }
     }
 
-    async fn transcribe_wav(&self, wav_audio: &[u8]) -> anyhow::Result<String> {
+    async fn transcribe_wav(&self, stt_model: &str, wav_audio: &[u8]) -> anyhow::Result<String> {
         #[derive(Debug, Deserialize)]
         struct TranscriptionResponse {
             text: String,
@@ -803,7 +811,7 @@ impl OpenAiAudioClient {
             .mime_str("audio/wav")?;
         let form = Form::new()
             .part("file", audio_part)
-            .text("model", self.stt_model.clone());
+            .text("model", stt_model.to_owned());
 
         let response = self
             .client
@@ -819,10 +827,15 @@ impl OpenAiAudioClient {
         Ok(response.text)
     }
 
-    async fn synthesize_mp3(&self, text: &str) -> anyhow::Result<Vec<u8>> {
+    async fn synthesize_mp3(
+        &self,
+        tts_model: &str,
+        tts_voice: &str,
+        text: &str,
+    ) -> anyhow::Result<Vec<u8>> {
         let payload = serde_json::json!({
-            "model": self.tts_model,
-            "voice": self.tts_voice,
+            "model": tts_model,
+            "voice": tts_voice,
             "input": text,
             "response_format": "mp3"
         });

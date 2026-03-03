@@ -5,8 +5,12 @@ use companionpilot_core::{
     discord_bot,
     http::{self, AppState},
     memory::{InMemoryMemoryStore, MemoryStore, PostgresMemoryStore},
-    model::{MockModelProvider, ModelProvider, OpenRouterProvider},
+    model::{ModelProvider, RuntimeModelProvider},
     orchestrator::DefaultChatOrchestrator,
+    runtime_settings::{
+        FileRuntimeSettingsStore, PostgresRuntimeSettingsStore, RuntimeSettings,
+        RuntimeSettingsManager, RuntimeSettingsStore,
+    },
     safety::SafetyPolicy,
     tools::{
         CliTool, CurrentDateTimeTool, SpogoCli, SpogoControlTool, SpogoSearchTool, SpogoStatusTool,
@@ -23,10 +27,17 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let config = AppConfig::from_env()?;
+    let runtime_settings = build_runtime_settings_manager(&config).await?;
+    let runtime_snapshot = runtime_settings.get().await;
 
-    let model = build_model_provider(&config);
+    let model = build_model_provider(&config, runtime_settings.clone());
     let memory = build_memory_store(&config).await?;
-    let voice = build_voice_manager(&config, memory.clone());
+    let voice = build_voice_manager(
+        &config,
+        runtime_settings.clone(),
+        &runtime_snapshot,
+        memory.clone(),
+    );
     let tools = build_tools(&config, voice.clone());
 
     let memory_for_dashboard = memory.clone();
@@ -52,14 +63,13 @@ async fn main() -> anyhow::Result<()> {
         let discord_orchestrator = orchestrator.clone();
         let discord_voice = voice.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                discord_bot::start_discord_bot(
-                    discord_token,
-                    discord_orchestrator,
-                    discord_voice,
-                    allowed_channel_ids,
-                )
-                .await
+            if let Err(error) = discord_bot::start_discord_bot(
+                discord_token,
+                discord_orchestrator,
+                discord_voice,
+                allowed_channel_ids,
+            )
+            .await
             {
                 warn!(?error, "Discord bot stopped with error");
             }
@@ -77,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let app = http::router(AppState {
         orchestrator,
         memory: memory_for_dashboard,
+        runtime_settings,
         api_auth_token: config.api_auth_token.clone(),
     });
     let listener = TcpListener::bind(config.http_bind).await?;
@@ -93,61 +104,21 @@ fn init_tracing() {
         .init();
 }
 
-fn build_model_provider(config: &AppConfig) -> Arc<dyn ModelProvider> {
-    let provider = config.model_provider.to_lowercase();
-    match provider.as_str() {
-        "openrouter" => {
-            if let Some(api_key) = config.openrouter_api_key.clone() {
-                info!(model = %config.openrouter_model, "using OpenRouter model provider");
-                Arc::new(OpenRouterProvider::new(
-                    api_key,
-                    config.openrouter_model.clone(),
-                    config.openrouter_referer.clone(),
-                    config.openrouter_title.clone(),
-                ))
-            } else {
-                warn!("MODEL_PROVIDER=openrouter but OPENROUTER_API_KEY is missing; using mock");
-                Arc::new(MockModelProvider)
-            }
-        }
-        "mock" => {
-            warn!("MODEL_PROVIDER=mock; using mock model provider");
-            Arc::new(MockModelProvider)
-        }
-        "auto" => {
-            if let Some(api_key) = config.openrouter_api_key.clone() {
-                info!(
-                    model = %config.openrouter_model,
-                    "using OpenRouter model provider (auto mode)"
-                );
-                Arc::new(OpenRouterProvider::new(
-                    api_key,
-                    config.openrouter_model.clone(),
-                    config.openrouter_referer.clone(),
-                    config.openrouter_title.clone(),
-                ))
-            } else {
-                warn!("No OPENROUTER_API_KEY configured; using mock model provider");
-                Arc::new(MockModelProvider)
-            }
-        }
-        other => {
-            warn!(
-                provider = %other,
-                "unknown MODEL_PROVIDER value; valid values are auto|openrouter|mock; falling back to auto"
-            );
-            if let Some(api_key) = config.openrouter_api_key.clone() {
-                Arc::new(OpenRouterProvider::new(
-                    api_key,
-                    config.openrouter_model.clone(),
-                    config.openrouter_referer.clone(),
-                    config.openrouter_title.clone(),
-                ))
-            } else {
-                Arc::new(MockModelProvider)
-            }
-        }
+fn build_model_provider(
+    config: &AppConfig,
+    runtime_settings: Arc<RuntimeSettingsManager>,
+) -> Arc<dyn ModelProvider> {
+    if config.openrouter_api_key.is_none() {
+        warn!(
+            "OPENROUTER_API_KEY is missing; runtime MODEL_PROVIDER=openrouter will fall back to mock"
+        );
     }
+    Arc::new(RuntimeModelProvider::new(
+        runtime_settings,
+        config.openrouter_api_key.clone(),
+        config.openrouter_referer.clone(),
+        config.openrouter_title.clone(),
+    ))
 }
 
 async fn build_memory_store(config: &AppConfig) -> anyhow::Result<Arc<dyn MemoryStore>> {
@@ -197,6 +168,8 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
 
 fn build_voice_manager(
     config: &AppConfig,
+    runtime_settings: Arc<RuntimeSettingsManager>,
+    initial_settings: &RuntimeSettings,
     memory: Arc<dyn MemoryStore>,
 ) -> Option<Arc<VoiceManager>> {
     if !config.voice_enabled {
@@ -208,7 +181,7 @@ fn build_voice_manager(
         return None;
     };
 
-    let allowlist = VoiceRuntimeConfig::parse_allowlist(&config.voice_allowlist);
+    let allowlist = VoiceRuntimeConfig::parse_allowlist(&initial_settings.voice_allowlist);
     if allowlist.is_empty() {
         warn!(
             "VOICE_ENABLED is true but VOICE_ALLOWLIST has no valid guild:channel entries; voice tools will fail until configured"
@@ -218,15 +191,52 @@ fn build_voice_manager(
     Some(VoiceManager::new(
         VoiceRuntimeConfig {
             openai_api_key,
-            stt_model: config.openai_stt_model.clone(),
-            tts_model: config.openai_tts_model.clone(),
-            tts_voice: config.openai_tts_voice.clone(),
+            stt_model: initial_settings.openai_stt_model.clone(),
+            tts_model: initial_settings.openai_tts_model.clone(),
+            tts_voice: initial_settings.openai_tts_voice.clone(),
             allowlist,
-            idle_timeout: std::time::Duration::from_secs(config.voice_idle_timeout_sec),
-            default_chunk_gap: std::time::Duration::from_millis(config.voice_chunk_gap_ms),
-            default_listen_window: std::time::Duration::from_millis(config.voice_listen_window_ms),
-            default_max_turn: std::time::Duration::from_millis(config.voice_max_turn_ms),
+            idle_timeout: std::time::Duration::from_secs(initial_settings.voice_idle_timeout_sec),
+            default_chunk_gap: std::time::Duration::from_millis(
+                initial_settings.voice_chunk_gap_ms,
+            ),
+            default_listen_window: std::time::Duration::from_millis(
+                initial_settings.voice_listen_window_ms,
+            ),
+            default_max_turn: std::time::Duration::from_millis(initial_settings.voice_max_turn_ms),
         },
+        runtime_settings,
         memory,
     ))
+}
+
+async fn build_runtime_settings_manager(
+    config: &AppConfig,
+) -> anyhow::Result<Arc<RuntimeSettingsManager>> {
+    let defaults = RuntimeSettings {
+        model_provider: config.model_provider.clone(),
+        openrouter_model: config.openrouter_model.clone(),
+        openai_stt_model: config.openai_stt_model.clone(),
+        openai_tts_model: config.openai_tts_model.clone(),
+        openai_tts_voice: config.openai_tts_voice.clone(),
+        voice_allowlist: config.voice_allowlist.clone(),
+        voice_idle_timeout_sec: config.voice_idle_timeout_sec,
+        voice_listen_window_ms: config.voice_listen_window_ms,
+        voice_chunk_gap_ms: config.voice_chunk_gap_ms,
+        voice_max_turn_ms: config.voice_max_turn_ms,
+    };
+
+    let store: Arc<dyn RuntimeSettingsStore> = if let Some(database_url) = &config.database_url {
+        info!("using Postgres runtime settings store");
+        Arc::new(PostgresRuntimeSettingsStore::connect(database_url).await?)
+    } else {
+        info!(
+            path = %config.runtime_settings_path,
+            "using file runtime settings store"
+        );
+        Arc::new(FileRuntimeSettingsStore::new(
+            config.runtime_settings_path.clone(),
+        ))
+    };
+
+    RuntimeSettingsManager::new(defaults, store).await
 }

@@ -29,40 +29,14 @@ impl OpenRouterProvider {
             title,
         }
     }
-}
 
-#[derive(Debug, Serialize)]
-struct ChatCompletionRequest<'a> {
-    model: &'a str,
-    messages: Vec<ChatMessage<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ChatChoiceMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChoiceMessage {
-    content: Value,
-}
-
-#[async_trait]
-impl ModelProvider for OpenRouterProvider {
-    async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+    pub async fn complete_with_model(
+        &self,
+        model: &str,
+        request: ModelRequest,
+    ) -> anyhow::Result<String> {
         let payload = ChatCompletionRequest {
-            model: &self.model,
+            model,
             messages: vec![
                 ChatMessage {
                     role: "system",
@@ -102,6 +76,40 @@ impl ModelProvider for OpenRouterProvider {
             .ok_or_else(|| anyhow::anyhow!("model returned no choices"))?;
 
         Ok(content)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ChatCompletionRequest<'a> {
+    model: &'a str,
+    messages: Vec<ChatMessage<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoice {
+    message: ChatChoiceMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoiceMessage {
+    content: Value,
+}
+
+#[async_trait]
+impl ModelProvider for OpenRouterProvider {
+    async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+        self.complete_with_model(&self.model, request).await
     }
 }
 
