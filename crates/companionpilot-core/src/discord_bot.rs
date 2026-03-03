@@ -68,6 +68,12 @@ impl EventHandler for Handler {
         if msg.author.bot {
             return;
         }
+        let bot_user_id = ctx.cache.current_user().id;
+        let is_direct_message = msg.guild_id.is_none();
+        let mentions_bot = msg.mentions.iter().any(|user| user.id == bot_user_id);
+        if !is_direct_message && !mentions_bot {
+            return;
+        }
 
         let guild_id = msg
             .guild_id
