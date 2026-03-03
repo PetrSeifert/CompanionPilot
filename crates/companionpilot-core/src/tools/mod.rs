@@ -1,5 +1,6 @@
 mod current_datetime;
 mod spogo_cli;
+mod spogo_cli_tool;
 mod spogo_control;
 mod spogo_search;
 mod spogo_status;
@@ -14,6 +15,7 @@ use crate::{types::MessageCtx, voice::VoiceManager};
 
 pub use current_datetime::CurrentDateTimeTool;
 pub use spogo_cli::{DEFAULT_SPOGO_BIN_PATH, DEFAULT_SPOGO_TIMEOUT_MS, SpogoCli};
+pub use spogo_cli_tool::CliTool;
 pub use spogo_control::SpogoControlTool;
 pub use spogo_search::SpogoSearchTool;
 pub use spogo_status::SpogoStatusTool;
@@ -38,6 +40,7 @@ pub trait ToolExecutor: Send + Sync {
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
     pub current_datetime: CurrentDateTimeTool,
+    pub cli: CliTool,
     pub spogo_control: SpogoControlTool,
     pub spogo_status: SpogoStatusTool,
     pub spogo_search: SpogoSearchTool,
@@ -55,6 +58,7 @@ impl ToolExecutor for ToolRegistry {
     ) -> anyhow::Result<ToolResult> {
         match tool_name {
             "current_datetime" => self.current_datetime.get_now(args).await,
+            "cli" => self.cli.execute_command(args).await,
             "spogo_control" => self.spogo_control.control(args).await,
             "spogo_status" => self.spogo_status.get_status(args).await,
             "spogo_search" => self.spogo_search.search(args).await,

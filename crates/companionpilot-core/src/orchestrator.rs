@@ -849,6 +849,9 @@ Store only durable personal facts (identity, preferences, recurring goals, corre
 Do not store one-off requests or transient states.
 Use web search for latest/current/news/prices/weather or unknown factual claims.
 Prefer spogo_search for Spotify catalog lookup requests (tracks, artists, albums, playlists).
+For advanced or unsupported Spotify operations, use cli for raw terminal commands.
+cli has a strict policy: only commands starting with `spogo` are allowed; any other command will be blocked.
+If uncertain about spogo usage, first call cli with command \"spogo -h\" or \"spogo <subcommand> -h\".
 For time-sensitive requests, call current_datetime before web_search so queries and answers are anchored to real current time.
 If current_datetime is needed, request only current_datetime in this decision and wait for its output before planning web_search.
 Tool inventory:
@@ -877,6 +880,9 @@ If action=tools, final_answer must be empty and tool_calls must contain at least
 Only request tools when the current outputs are insufficient or conflicting.
 For time-sensitive requests, prefer calling current_datetime before additional web_search calls.
 Prefer spogo_search for Spotify catalog lookup requests (tracks, artists, albums, playlists).
+For advanced or unsupported Spotify operations, use cli for raw terminal commands.
+cli has a strict policy: only commands starting with `spogo` are allowed; any other command will be blocked.
+If uncertain about spogo usage, call cli with command \"spogo -h\" or \"spogo <subcommand> -h\" before guessing.
 If current_datetime is needed, call it alone first, then plan web_search in a later tool round.
 Tool inventory:
 {}
@@ -920,6 +926,15 @@ fn build_tool_inventory_for_planner() -> &'static str {
     "args_schema": {},
     "when_to_use": "Need the exact current date/time before time-sensitive lookups or answers.",
     "when_not_to_use": "Question is timeless or explicitly historical."
+  },
+  {
+    "tool_name": "cli",
+    "args_schema": {
+      "command": "string (recommended, raw shell-like command; must start with `spogo`)",
+      "args": "array<string> or string (optional alternative to command; if used must start with `spogo` token)"
+    },
+    "when_to_use": "Need full spogo feature coverage not exposed by typed spogo tools, or need to inspect help/usage via -h.",
+    "when_not_to_use": "Request is unrelated to spogo/Spotify, or a typed tool (spogo_status|spogo_control|spogo_search) cleanly covers the request."
   },
   {
     "tool_name": "spogo_status",
@@ -1009,6 +1024,16 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
                     tool_name: "current_datetime".to_owned(),
                     args: json!({}),
                 });
+            }
+            "cli" => {
+                if let Some(args) = sanitize_cli_args(&planned_call.args) {
+                    sanitized_calls.push(ToolCall {
+                        tool_name: "cli".to_owned(),
+                        args,
+                    });
+                } else {
+                    debug!("dropping planner cli call with invalid args");
+                }
             }
             "spogo_status" => {
                 sanitized_calls.push(ToolCall {
@@ -1121,6 +1146,44 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
     }
 
     sanitized_calls
+}
+
+fn sanitize_cli_args(raw_args: &Value) -> Option<Value> {
+    if let Some(command) = raw_args
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if command.split_whitespace().count() > 64 {
+            return None;
+        }
+        return Some(json!({ "command": command }));
+    }
+
+    let args_value = raw_args.get("args")?;
+    let args = match args_value {
+        Value::String(raw) => raw
+            .split_whitespace()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>(),
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>(),
+        _ => return None,
+    };
+
+    if args.is_empty() || args.len() > 64 {
+        return None;
+    }
+
+    Some(json!({ "args": args }))
 }
 
 fn sanitize_spogo_control_args(raw_args: &Value) -> Option<Value> {
@@ -1952,6 +2015,30 @@ mod tests {
         assert_eq!(sanitized.len(), 1);
         assert_eq!(sanitized[0].tool_name, "current_datetime");
         assert_eq!(sanitized[0].args, json!({}));
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_allows_cli_command() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "cli".to_owned(),
+            args: json!({"command": "spogo -h"}),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].tool_name, "cli");
+        assert_eq!(sanitized[0].args, json!({ "command": "spogo -h" }));
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_drops_cli_without_command_or_args() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "cli".to_owned(),
+            args: json!({}),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert!(sanitized.is_empty());
     }
 
     #[test]

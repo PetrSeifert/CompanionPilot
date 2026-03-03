@@ -18,6 +18,7 @@ Workspace layout:
 - Built-in `spogo_status` tool for current Spotify playback (shared account)
 - Built-in `spogo_control` tool for Spotify playback control via local `spogo` CLI
 - Built-in `spogo_search` tool for Spotify catalog search via local `spogo` CLI
+- Built-in `cli` tool for raw CLI command execution with `spogo`-only enforcement
 - HTTP API for health and chat (`axum`)
 - Reply timing telemetry (planner/tools/model/memory stage durations)
 - Local dev infra (`docker-compose` with Postgres + Redis)
@@ -76,6 +77,8 @@ curl -X POST http://localhost:8080/chat \
 - For Spotify playback status requests, planner can call `spogo_status`.
 - For Spotify playback control requests, planner can call `spogo_control` with action-specific args.
 - For Spotify catalog lookup requests, planner can call `spogo_search` with `q` + `type` and optional CLI-native filters.
+- For any advanced `spogo` operation not covered above, planner can call `cli` with `command` (for example `spogo -h`).
+- `cli` blocks any non-`spogo` command and returns a clear "not allowed" error.
 - Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 - Short-term memory is injected from recent channel turns, even when no long-term fact is stored.

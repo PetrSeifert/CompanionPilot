@@ -9,7 +9,7 @@ use companionpilot_core::{
     orchestrator::DefaultChatOrchestrator,
     safety::SafetyPolicy,
     tools::{
-        CurrentDateTimeTool, SpogoCli, SpogoControlTool, SpogoSearchTool, SpogoStatusTool,
+        CliTool, CurrentDateTimeTool, SpogoCli, SpogoControlTool, SpogoSearchTool, SpogoStatusTool,
         TavilyWebSearchTool, ToolExecutor, ToolRegistry,
     },
     voice::{VoiceManager, VoiceRuntimeConfig},
@@ -159,6 +159,7 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
     let spogo_control =
         SpogoControlTool::new(spogo_cli.clone(), config.spogo_account_label.clone());
     let spogo_status = SpogoStatusTool::new(spogo_cli.clone(), config.spogo_account_label.clone());
+    let cli_tool = CliTool::new(spogo_cli.clone());
     let spogo_search = SpogoSearchTool::new(spogo_cli);
 
     if web_search.is_none() {
@@ -170,6 +171,7 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
 
     Arc::new(ToolRegistry {
         current_datetime: CurrentDateTimeTool,
+        cli: cli_tool,
         spogo_control,
         spogo_status,
         spogo_search,
