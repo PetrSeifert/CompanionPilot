@@ -366,6 +366,7 @@ dependencies = [
  "serenity",
  "songbird",
  "sqlx",
+ "subtle",
  "symphonia",
  "tokio",
  "tower-http",
