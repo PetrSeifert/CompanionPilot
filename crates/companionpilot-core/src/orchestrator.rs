@@ -723,6 +723,7 @@ impl DefaultChatOrchestrator {
         let Some(skill) = get_tool_skill(tool_name) else {
             return planned_args.clone();
         };
+        let refinement_started_at = Instant::now();
 
         let refinement_prompt = build_tool_arg_refinement_prompt(
             tool_name,
@@ -744,6 +745,23 @@ impl DefaultChatOrchestrator {
         let refinement_result = match refinement_result {
             Ok(content) => content,
             Err(error) => {
+                let error_text = error.to_string();
+                let duration_ms = elapsed_ms(refinement_started_at);
+                self.record_tool_arg_refinement_decision(
+                    ctx,
+                    source,
+                    tool_name,
+                    "fallback_planned_args",
+                    "model_error".to_owned(),
+                    json!({
+                        "planned_args": planned_args,
+                        "reason": "model_error"
+                    }),
+                    false,
+                    Some(error_text.clone()),
+                    duration_ms,
+                )
+                .await;
                 warn!(
                     ?error,
                     user_id = %ctx.user_id,
@@ -758,6 +776,24 @@ impl DefaultChatOrchestrator {
         let refinement_plan = match parse_tool_arg_refinement(&refinement_result) {
             Ok(plan) => plan,
             Err(error) => {
+                let duration_ms = elapsed_ms(refinement_started_at);
+                let truncated_output = truncate_for_log(&refinement_result, 220);
+                self.record_tool_arg_refinement_decision(
+                    ctx,
+                    source,
+                    tool_name,
+                    "fallback_planned_args",
+                    "parse_error".to_owned(),
+                    json!({
+                        "planned_args": planned_args,
+                        "reason": "parse_error",
+                        "refinement_output": truncated_output
+                    }),
+                    false,
+                    Some(error.to_string()),
+                    duration_ms,
+                )
+                .await;
                 warn!(
                     ?error,
                     refinement_output = %truncate_for_log(&refinement_result, 220),
@@ -772,6 +808,22 @@ impl DefaultChatOrchestrator {
 
         let Some(refined_args) = sanitize_single_tool_call_args(tool_name, refinement_plan.args)
         else {
+            let duration_ms = elapsed_ms(refinement_started_at);
+            self.record_tool_arg_refinement_decision(
+                ctx,
+                source,
+                tool_name,
+                "fallback_planned_args",
+                "invalid_refined_args".to_owned(),
+                json!({
+                    "planned_args": planned_args,
+                    "reason": "invalid_refined_args"
+                }),
+                false,
+                Some("invalid_refined_args".to_owned()),
+                duration_ms,
+            )
+            .await;
             warn!(
                 user_id = %ctx.user_id,
                 planner_source = source,
@@ -782,6 +834,28 @@ impl DefaultChatOrchestrator {
         };
 
         let args_changed = refined_args != *planned_args;
+        let duration_ms = elapsed_ms(refinement_started_at);
+        let decision = if args_changed {
+            "apply_refined_args"
+        } else {
+            "keep_planned_args"
+        };
+        self.record_tool_arg_refinement_decision(
+            ctx,
+            source,
+            tool_name,
+            decision,
+            refinement_plan.rationale.clone(),
+            json!({
+                "planned_args": planned_args,
+                "refined_args": refined_args.clone(),
+                "args_changed": args_changed
+            }),
+            true,
+            None,
+            duration_ms,
+        )
+        .await;
         if args_changed {
             info!(
                 user_id = %ctx.user_id,
@@ -883,6 +957,35 @@ impl DefaultChatOrchestrator {
             rationale,
             json!({
                 "round": round,
+                "decision": payload
+            }),
+            success,
+            error,
+            duration_ms,
+        )
+        .await;
+    }
+
+    async fn record_tool_arg_refinement_decision(
+        &self,
+        ctx: &MessageCtx,
+        source: &str,
+        tool_name: &str,
+        decision: &str,
+        rationale: String,
+        payload: Value,
+        success: bool,
+        error: Option<String>,
+        duration_ms: u64,
+    ) {
+        self.record_planner_decision(
+            ctx,
+            "tool_arg_refinement",
+            decision,
+            rationale,
+            json!({
+                "source": source,
+                "tool_name": tool_name,
                 "decision": payload
             }),
             success,
@@ -1855,7 +1958,7 @@ mod tests {
         let memory = Arc::new(InMemoryMemoryStore::default());
         let orchestrator = DefaultChatOrchestrator::new(
             Arc::new(RefinementSuccessModelProvider),
-            memory,
+            memory.clone(),
             Arc::new(StubWebSearchToolExecutor),
             SafetyPolicy::default(),
         );
@@ -1877,6 +1980,16 @@ mod tests {
         assert_eq!(result.tool_calls[0].args["query"], "beta");
         assert_eq!(result.tool_calls[0].args["max_results"], 2);
         assert_eq!(result.text, "done");
+
+        let decisions = memory
+            .list_planner_decisions("u3c", 20)
+            .await
+            .expect("planner decisions should list");
+        assert!(decisions.iter().any(|decision| {
+            decision.planner == "tool_arg_refinement"
+                && decision.decision == "apply_refined_args"
+                && decision.success
+        }));
     }
 
     #[tokio::test]
@@ -1884,7 +1997,7 @@ mod tests {
         let memory = Arc::new(InMemoryMemoryStore::default());
         let orchestrator = DefaultChatOrchestrator::new(
             Arc::new(RefinementInvalidModelProvider),
-            memory,
+            memory.clone(),
             Arc::new(StubWebSearchToolExecutor),
             SafetyPolicy::default(),
         );
@@ -1906,6 +2019,16 @@ mod tests {
         assert_eq!(result.tool_calls[0].args["query"], "alpha");
         assert_eq!(result.tool_calls[0].args["max_results"], 3);
         assert_eq!(result.text, "done");
+
+        let decisions = memory
+            .list_planner_decisions("u3d", 20)
+            .await
+            .expect("planner decisions should list");
+        assert!(decisions.iter().any(|decision| {
+            decision.planner == "tool_arg_refinement"
+                && decision.decision == "fallback_planned_args"
+                && !decision.success
+        }));
     }
 
     #[tokio::test]
