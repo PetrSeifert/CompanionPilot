@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use chrono::Utc;
 use serenity::{
@@ -21,6 +21,7 @@ const DISCORD_MESSAGE_MAX_CHARS: usize = 2_000;
 struct Handler {
     orchestrator: Arc<DefaultChatOrchestrator>,
     voice: Option<Arc<VoiceManager>>,
+    allowed_channel_ids: HashSet<u64>,
 }
 
 impl Handler {
@@ -73,6 +74,11 @@ impl EventHandler for Handler {
         let bot_user_id = ctx.cache.current_user().id;
         let is_direct_message = msg.guild_id.is_none();
         let mentions_bot = msg.mentions.iter().any(|user| user.id == bot_user_id);
+        let channel_allowed = self.allowed_channel_ids.is_empty()
+            || self.allowed_channel_ids.contains(&msg.channel_id.get());
+        if !is_direct_message && !channel_allowed {
+            return;
+        }
         if !is_direct_message && !mentions_bot {
             return;
         }
@@ -164,6 +170,7 @@ pub async fn start_discord_bot(
     token: String,
     orchestrator: Arc<DefaultChatOrchestrator>,
     voice: Option<Arc<VoiceManager>>,
+    allowed_channel_ids: HashSet<u64>,
 ) -> anyhow::Result<()> {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::GUILDS
@@ -174,6 +181,7 @@ pub async fn start_discord_bot(
     let handler = Handler {
         orchestrator,
         voice: voice.clone(),
+        allowed_channel_ids,
     };
 
     let mut builder = Client::builder(token, intents).event_handler(handler);
@@ -189,6 +197,18 @@ pub async fn start_discord_bot(
     info!("starting Discord gateway client");
     client.start().await?;
     Ok(())
+}
+
+pub fn parse_allowed_channel_ids(raw: &str) -> HashSet<u64> {
+    raw.split([',', ';', ' ', '\n', '\t'])
+        .filter_map(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            trimmed.parse::<u64>().ok()
+        })
+        .collect()
 }
 
 fn split_message_for_discord(text: &str, max_chars: usize) -> Vec<&str> {
@@ -218,7 +238,7 @@ fn split_message_for_discord(text: &str, max_chars: usize) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DISCORD_MESSAGE_MAX_CHARS, split_message_for_discord};
+    use super::{DISCORD_MESSAGE_MAX_CHARS, parse_allowed_channel_ids, split_message_for_discord};
 
     #[test]
     fn split_message_for_discord_enforces_limit() {
@@ -236,5 +256,22 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), DISCORD_MESSAGE_MAX_CHARS);
         assert_eq!(chunks[1].chars().count(), 1);
+    }
+
+    #[test]
+    fn parse_allowed_channel_ids_parses_delimited_values() {
+        let ids = parse_allowed_channel_ids("123, 456;789\n101112");
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&123));
+        assert!(ids.contains(&456));
+        assert!(ids.contains(&789));
+        assert!(ids.contains(&101112));
+    }
+
+    #[test]
+    fn parse_allowed_channel_ids_ignores_invalid_entries() {
+        let ids = parse_allowed_channel_ids("123,abc,, -5");
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&123));
     }
 }

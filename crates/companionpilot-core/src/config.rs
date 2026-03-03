@@ -4,6 +4,7 @@ use std::{env, net::SocketAddr};
 pub struct AppConfig {
     pub http_bind: SocketAddr,
     pub discord_token: Option<String>,
+    pub discord_allowed_channel_ids: String,
     pub model_provider: String,
     pub openrouter_api_key: Option<String>,
     pub openrouter_model: String,
@@ -37,6 +38,7 @@ impl AppConfig {
         Ok(Self {
             http_bind,
             discord_token: env::var("DISCORD_TOKEN").ok(),
+            discord_allowed_channel_ids: env::var("DISCORD_ALLOWED_CHANNEL_IDS").unwrap_or_default(),
             model_provider: env::var("MODEL_PROVIDER").unwrap_or_else(|_| "auto".to_owned()),
             openrouter_api_key: env::var("OPENROUTER_API_KEY").ok(),
             openrouter_model: env::var("OPENROUTER_MODEL")

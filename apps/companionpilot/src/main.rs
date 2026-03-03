@@ -42,12 +42,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(discord_token) = config.discord_token.clone() {
+        let allowed_channel_ids =
+            discord_bot::parse_allowed_channel_ids(&config.discord_allowed_channel_ids);
+        if !config.discord_allowed_channel_ids.trim().is_empty() && allowed_channel_ids.is_empty() {
+            warn!(
+                "DISCORD_ALLOWED_CHANNEL_IDS is set but contains no valid channel IDs; allowlist is disabled"
+            );
+        }
         let discord_orchestrator = orchestrator.clone();
         let discord_voice = voice.clone();
         tokio::spawn(async move {
             if let Err(error) =
-                discord_bot::start_discord_bot(discord_token, discord_orchestrator, discord_voice)
-                    .await
+                discord_bot::start_discord_bot(
+                    discord_token,
+                    discord_orchestrator,
+                    discord_voice,
+                    allowed_channel_ids,
+                )
+                .await
             {
                 warn!(?error, "Discord bot stopped with error");
             }
