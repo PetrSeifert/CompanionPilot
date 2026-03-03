@@ -127,7 +127,11 @@ fn truncate_for_output(value: &str) -> String {
     if value.len() <= max {
         value.to_owned()
     } else {
-        format!("{}...", &value[..max])
+        let mut end = max;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &value[..end])
     }
 }
 
@@ -148,5 +152,18 @@ fn shell_quote(value: &str) -> String {
         value.to_owned()
     } else {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_for_output;
+
+    #[test]
+    fn truncate_for_output_handles_multibyte_utf8() {
+        let text = "a".repeat(319) + "😄tail";
+        let truncated = truncate_for_output(&text);
+        assert!(truncated.ends_with("..."));
+        assert!(!truncated.contains("tail"));
     }
 }

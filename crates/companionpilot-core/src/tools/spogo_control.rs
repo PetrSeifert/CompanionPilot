@@ -259,7 +259,11 @@ fn truncate_for_output(value: &str) -> String {
     if value.len() <= max {
         value.to_owned()
     } else {
-        format!("{}...", &value[..max])
+        let mut end = max;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &value[..end])
     }
 }
 
@@ -312,7 +316,7 @@ fn is_supported_action(action: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{ControlArgs, prepare_control_action};
+    use super::{ControlArgs, prepare_control_action, truncate_for_output};
 
     fn parse_args(value: serde_json::Value) -> ControlArgs {
         serde_json::from_value(value).expect("control args should deserialize")
@@ -351,5 +355,13 @@ mod tests {
             "state": "on"
         }));
         assert!(prepare_control_action(args).is_err());
+    }
+
+    #[test]
+    fn truncate_for_output_handles_multibyte_utf8() {
+        let text = "a".repeat(239) + "😄tail";
+        let truncated = truncate_for_output(&text);
+        assert!(truncated.ends_with("..."));
+        assert!(!truncated.contains("tail"));
     }
 }
