@@ -59,6 +59,8 @@ impl SpogoCli {
         let command_line = format_command_line(&self.bin_path, &full_args);
         info!(command = %command_line, "spogo command start");
 
+        // Safety: this invokes the binary directly without a shell.
+        // Tokens are passed as argv via Command::args, so shell metacharacters are not interpreted.
         let mut command = Command::new(&self.bin_path);
         command
             .args(&full_args)

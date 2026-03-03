@@ -10,7 +10,7 @@ use crate::{
     memory::MemoryStore,
     model::{ModelProvider, ModelRequest},
     safety::SafetyPolicy,
-    tools::ToolExecutor,
+    tools::{ToolExecutor, sanitize_cli_invocation_args},
     types::{
         ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, MessageLatencyRecord,
         OrchestratorReply, PlannerDecisionRecord, ReplyTimings, ToolCall, ToolCallRecord,
@@ -1026,7 +1026,7 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
                 });
             }
             "cli" => {
-                if let Some(args) = sanitize_cli_args(&planned_call.args) {
+                if let Some(args) = sanitize_cli_invocation_args(&planned_call.args) {
                     sanitized_calls.push(ToolCall {
                         tool_name: "cli".to_owned(),
                         args,
@@ -1146,44 +1146,6 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
     }
 
     sanitized_calls
-}
-
-fn sanitize_cli_args(raw_args: &Value) -> Option<Value> {
-    if let Some(command) = raw_args
-        .get("command")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if command.split_whitespace().count() > 64 {
-            return None;
-        }
-        return Some(json!({ "command": command }));
-    }
-
-    let args_value = raw_args.get("args")?;
-    let args = match args_value {
-        Value::String(raw) => raw
-            .split_whitespace()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>(),
-        Value::Array(values) => values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>(),
-        _ => return None,
-    };
-
-    if args.is_empty() || args.len() > 64 {
-        return None;
-    }
-
-    Some(json!({ "args": args }))
 }
 
 fn sanitize_spogo_control_args(raw_args: &Value) -> Option<Value> {
@@ -2027,7 +1989,18 @@ mod tests {
         let sanitized = sanitize_planned_tool_calls(planned_calls);
         assert_eq!(sanitized.len(), 1);
         assert_eq!(sanitized[0].tool_name, "cli");
-        assert_eq!(sanitized[0].args, json!({ "command": "spogo -h" }));
+        assert_eq!(sanitized[0].args, json!({ "args": ["spogo", "-h"] }));
+    }
+
+    #[test]
+    fn sanitize_planned_tool_calls_drops_cli_non_spogo_command() {
+        let planned_calls = vec![PlannedToolCall {
+            tool_name: "cli".to_owned(),
+            args: json!({"command": "ls -la"}),
+        }];
+
+        let sanitized = sanitize_planned_tool_calls(planned_calls);
+        assert!(sanitized.is_empty());
     }
 
     #[test]

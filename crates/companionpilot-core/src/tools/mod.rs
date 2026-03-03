@@ -16,6 +16,7 @@ use crate::{types::MessageCtx, voice::VoiceManager};
 pub use current_datetime::CurrentDateTimeTool;
 pub use spogo_cli::{DEFAULT_SPOGO_BIN_PATH, DEFAULT_SPOGO_TIMEOUT_MS, SpogoCli};
 pub use spogo_cli_tool::CliTool;
+pub(crate) use spogo_cli_tool::sanitize_cli_invocation_args;
 pub use spogo_control::SpogoControlTool;
 pub use spogo_search::SpogoSearchTool;
 pub use spogo_status::SpogoStatusTool;

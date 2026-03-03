@@ -1,5 +1,5 @@
 use anyhow::{Context, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{SpogoCli, ToolResult};
 
@@ -26,7 +26,14 @@ impl CliTool {
         let stdout = output.stdout.trim();
         let stderr = output.stderr.trim();
 
-        let mut lines = vec!["CLI command executed successfully.".to_owned()];
+        let mut lines = if output.exit_code == 0 {
+            vec!["CLI command completed with exit_code=0.".to_owned()]
+        } else {
+            vec![format!(
+                "CLI command failed with exit_code={}.",
+                output.exit_code
+            )]
+        };
         if !stdout.is_empty() {
             lines.push(format!("stdout:\n{stdout}"));
         }
@@ -44,6 +51,12 @@ impl CliTool {
     }
 }
 
+pub(crate) fn sanitize_cli_invocation_args(raw_args: &Value) -> Option<Value> {
+    let args = parse_cli_args(raw_args).ok()?;
+    validate_and_extract_spogo_args(args.clone()).ok()?;
+    Some(json!({ "args": args }))
+}
+
 fn validate_and_extract_spogo_args(command_args: Vec<String>) -> anyhow::Result<Vec<String>> {
     let Some((command, subcommand_args)) = command_args.split_first() else {
         bail!("cli requires at least one token in args");
@@ -52,6 +65,14 @@ fn validate_and_extract_spogo_args(command_args: Vec<String>) -> anyhow::Result<
         bail!(
             "CLI command `{}` is not allowed. Only `spogo` commands are allowed.",
             command
+        );
+    }
+    if command_args
+        .iter()
+        .any(|token| has_disallowed_shell_syntax(token))
+    {
+        bail!(
+            "CLI command contains disallowed shell syntax. Allowed usage is plain spogo args only."
         );
     }
     Ok(subcommand_args.to_vec())
@@ -66,8 +87,6 @@ fn parse_cli_args(args: &Value) -> anyhow::Result<Vec<String>> {
     {
         command
             .split_whitespace()
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>()
     } else {
@@ -77,8 +96,6 @@ fn parse_cli_args(args: &Value) -> anyhow::Result<Vec<String>> {
         match raw {
             Value::String(raw) => raw
                 .split_whitespace()
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>(),
             Value::Array(values) => values
@@ -102,11 +119,20 @@ fn parse_cli_args(args: &Value) -> anyhow::Result<Vec<String>> {
     Ok(parsed)
 }
 
+fn has_disallowed_shell_syntax(token: &str) -> bool {
+    matches!(token, "|" | "||" | "&" | "&&")
+        || token.contains(';')
+        || token.contains('`')
+        || token.contains("$(")
+        || token.contains('>')
+        || token.contains('<')
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{parse_cli_args, validate_and_extract_spogo_args};
+    use super::{parse_cli_args, sanitize_cli_invocation_args, validate_and_extract_spogo_args};
 
     #[test]
     fn parses_command_string() {
@@ -145,5 +171,24 @@ mod tests {
     fn rejects_non_spogo_commands() {
         let args = vec!["ls".to_owned(), "-la".to_owned()];
         assert!(validate_and_extract_spogo_args(args).is_err());
+    }
+
+    #[test]
+    fn rejects_shell_metacharacters() {
+        let args = vec!["spogo".to_owned(), "search;".to_owned(), "track".to_owned()];
+        assert!(validate_and_extract_spogo_args(args).is_err());
+    }
+
+    #[test]
+    fn sanitize_cli_args_canonicalizes_command_to_args() {
+        let raw = json!({ "command": "spogo -h" });
+        let sanitized = sanitize_cli_invocation_args(&raw).expect("sanitization should pass");
+        assert_eq!(sanitized, json!({ "args": ["spogo", "-h"] }));
+    }
+
+    #[test]
+    fn sanitize_cli_args_rejects_non_spogo_command() {
+        let raw = json!({ "command": "ls -la" });
+        assert!(sanitize_cli_invocation_args(&raw).is_none());
     }
 }
