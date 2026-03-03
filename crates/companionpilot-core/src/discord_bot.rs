@@ -134,9 +134,7 @@ impl EventHandler for Handler {
             return;
         };
 
-        let channel_id = new
-            .channel_id
-            .or_else(|| old.as_ref().and_then(|state| state.channel_id));
+        let channel_id = new.channel_id;
         voice
             .update_user_voice_state(
                 guild_id.get(),
