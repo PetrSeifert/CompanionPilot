@@ -3,12 +3,12 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{Request, StatusCode, header},
+    http::{HeaderValue, Request, StatusCode, header},
     middleware::{self, Next},
-    response::IntoResponse,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
@@ -19,6 +19,8 @@ use crate::{
     runtime_settings::{RuntimeSettings, RuntimeSettingsManager, RuntimeSettingsUpdate},
     types::{MessageCtx, OrchestratorReply},
 };
+
+const BASIC_AUTH_CHALLENGE: &str = r#"Basic realm="CompanionPilot", charset="UTF-8""#;
 
 static DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
@@ -100,7 +102,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            require_bearer_auth,
+            require_api_auth,
         ));
 
     Router::new()
@@ -111,35 +113,75 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn require_bearer_auth(
+async fn require_api_auth(
     State(state): State<AppState>,
     request: Request<axum::body::Body>,
     next: Next,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, Response> {
     let expected_token = state
         .api_auth_token
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "API auth token is not configured".to_owned(),
-        ))?;
+        .ok_or_else(api_auth_unavailable_response)?;
 
-    let provided_token = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|raw| raw.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-
-    if provided_token != Some(expected_token) {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "missing or invalid bearer token".to_owned(),
-        ));
+    let provided_auth = request.headers().get(header::AUTHORIZATION);
+    if !authorization_matches_expected_token(provided_auth, expected_token) {
+        return Err(unauthorized_response());
     }
 
     Ok(next.run(request).await)
+}
+
+fn authorization_matches_expected_token(
+    authorization_header: Option<&HeaderValue>,
+    expected_token: &str,
+) -> bool {
+    let Some(raw_header) = authorization_header else {
+        return false;
+    };
+
+    let Ok(value) = raw_header.to_str() else {
+        return false;
+    };
+
+    if let Some(token) = value.strip_prefix("Bearer ") {
+        return token == expected_token;
+    }
+
+    let Some(encoded_credentials) = value.strip_prefix("Basic ") else {
+        return false;
+    };
+    let Ok(decoded_bytes) = STANDARD.decode(encoded_credentials) else {
+        return false;
+    };
+    let Ok(decoded_credentials) = std::str::from_utf8(&decoded_bytes) else {
+        return false;
+    };
+
+    let Some((username, password)) = decoded_credentials.split_once(':') else {
+        return false;
+    };
+
+    // Accept token as either username or password to work with common browser credential prompts.
+    username == expected_token || password == expected_token
+}
+
+fn unauthorized_response() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, BASIC_AUTH_CHALLENGE)],
+        "missing or invalid credentials",
+    )
+        .into_response()
+}
+
+fn api_auth_unavailable_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "API auth token is not configured",
+    )
+        .into_response()
 }
 
 async fn index() -> &'static str {
@@ -358,4 +400,63 @@ fn internal_error(error: anyhow::Error) -> (axum::http::StatusCode, String) {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         format!("internal error: {error}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_authorization_value(value: &str) -> HeaderValue {
+        HeaderValue::from_str(value).expect("valid authorization header")
+    }
+
+    #[test]
+    fn accepts_bearer_token() {
+        let expected = "dashboard-secret";
+        let header = make_authorization_value("Bearer dashboard-secret");
+        assert!(authorization_matches_expected_token(
+            Some(&header),
+            expected
+        ));
+    }
+
+    #[test]
+    fn accepts_basic_token_as_password() {
+        let expected = "dashboard-secret";
+        let encoded = STANDARD.encode(format!("operator:{expected}"));
+        let header = make_authorization_value(&format!("Basic {encoded}"));
+        assert!(authorization_matches_expected_token(
+            Some(&header),
+            expected
+        ));
+    }
+
+    #[test]
+    fn accepts_basic_token_as_username() {
+        let expected = "dashboard-secret";
+        let encoded = STANDARD.encode(format!("{expected}:ignored"));
+        let header = make_authorization_value(&format!("Basic {encoded}"));
+        assert!(authorization_matches_expected_token(
+            Some(&header),
+            expected
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_authorization() {
+        let expected = "dashboard-secret";
+        let invalid_bearer = make_authorization_value("Bearer wrong");
+        assert!(!authorization_matches_expected_token(
+            Some(&invalid_bearer),
+            expected
+        ));
+
+        let malformed_basic = make_authorization_value("Basic not-base64!");
+        assert!(!authorization_matches_expected_token(
+            Some(&malformed_basic),
+            expected
+        ));
+
+        assert!(!authorization_matches_expected_token(None, expected));
+    }
 }

@@ -64,9 +64,15 @@ curl http://localhost:8080/health
 
 ```bash
 curl -X POST http://localhost:8080/chat \
+  -H "authorization: Bearer $API_AUTH_TOKEN" \
   -H "content-type: application/json" \
   -d '{"user_id":"demo","content":"my name is Petr"}'
 ```
+
+7. Open dashboard in browser:
+
+- Navigate to `http://localhost:8080/dashboard`.
+- When prompted for HTTP Basic credentials, use any username and set the password to `API_AUTH_TOKEN`.
 
 ## Discord usage
 
@@ -121,7 +127,10 @@ OpenRouter settings:
 - If `DATABASE_URL` is missing, memory uses in-process storage.
 - If `TAVILY_API_KEY` is missing, planner-selected `web_search` calls return a configuration error.
 - Spotify tool calls use local `spogo` CLI execution with fail-fast error propagation.
-- HTTP endpoints are currently unauthenticated. Add auth before exposing to untrusted users.
+- `API_AUTH_TOKEN` protects `/chat`, `/dashboard`, and dashboard `/api/*` endpoints.
+- Auth supports:
+  - `Authorization: Bearer <token>` (for scripts/clients)
+  - HTTP Basic (browser prompt; token can be username or password)
 
 ## Search diagnostics
 
