@@ -10,9 +10,10 @@ use crate::{
     memory::MemoryStore,
     model::{ModelProvider, ModelRequest},
     safety::SafetyPolicy,
-    tools::{ToolExecutor, get_tool_skill, sanitize_cli_invocation_args},
+    skills::{SkillCatalog, SkillDefinition, SkillMetadata},
+    tools::{ToolExecutor, sanitize_cli_invocation_args},
     types::{
-        ChatMessageRecord, ChatRole, MemoryContext, MemoryFact, MessageCtx, MessageLatencyRecord,
+        ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, MessageLatencyRecord,
         OrchestratorReply, PlannerDecisionRecord, ReplyTimings, ToolCall, ToolCallRecord,
         ToolCallTiming,
     },
@@ -25,7 +26,19 @@ pub struct DefaultChatOrchestrator {
     model: Arc<dyn ModelProvider>,
     memory: Arc<dyn MemoryStore>,
     tools: Arc<dyn ToolExecutor>,
+    skills: Arc<SkillCatalog>,
     safety: SafetyPolicy,
+}
+
+enum SkillSelectionDecision {
+    UseSelection {
+        selected_skill_ids: Vec<String>,
+        rationale: String,
+    },
+    Fallback {
+        reason: &'static str,
+        error: Option<String>,
+    },
 }
 
 enum UnifiedPlanDecision {
@@ -110,9 +123,9 @@ struct ToolFollowupPlan {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct ToolArgRefinement {
+struct SkillSelectionPlan {
     #[serde(default)]
-    args: Value,
+    selected_skills: Vec<String>,
     #[serde(default)]
     rationale: String,
 }
@@ -129,12 +142,14 @@ impl DefaultChatOrchestrator {
         model: Arc<dyn ModelProvider>,
         memory: Arc<dyn MemoryStore>,
         tools: Arc<dyn ToolExecutor>,
+        skills: Arc<SkillCatalog>,
         safety: SafetyPolicy,
     ) -> Self {
         Self {
             model,
             memory,
             tools,
+            skills,
             safety,
         }
     }
@@ -176,12 +191,28 @@ impl DefaultChatOrchestrator {
             .await?;
         let record_user_message_ms = elapsed_ms(record_user_message_started_at);
 
+        let skill_selector_started_at = Instant::now();
+        let skill_selection_decision = self
+            .decide_selected_skills(&ctx.content, &memory_context)
+            .await;
+        let skill_selector_ms = elapsed_ms(skill_selector_started_at);
+        self.record_skill_selector_decision(&ctx, &skill_selection_decision, skill_selector_ms)
+            .await;
+
+        let selected_skill_ids = match &skill_selection_decision {
+            SkillSelectionDecision::UseSelection {
+                selected_skill_ids, ..
+            } => selected_skill_ids.clone(),
+            SkillSelectionDecision::Fallback { .. } => Vec::new(),
+        };
+        let selected_skills = self.skills.select_by_ids(&selected_skill_ids);
+
         let planner_started_at = Instant::now();
         let planner_decision = self
-            .decide_unified_plan(&ctx.content, &memory_context)
+            .decide_unified_plan(&ctx.content, &memory_context, &selected_skills)
             .await;
         let unified_planner_ms = elapsed_ms(planner_started_at);
-        let mut planner_ms = unified_planner_ms;
+        let mut planner_ms = skill_selector_ms.saturating_add(unified_planner_ms);
         self.record_unified_planner_decision(&ctx, &planner_decision, unified_planner_ms)
             .await;
 
@@ -224,8 +255,6 @@ impl DefaultChatOrchestrator {
             };
             self.execute_planned_tool_calls(
                 &ctx,
-                &ctx.content,
-                &memory_context,
                 pending_tool_calls,
                 planner_source,
                 &mut executed_tool_calls,
@@ -237,7 +266,12 @@ impl DefaultChatOrchestrator {
 
             let followup_started_at = Instant::now();
             let followup_decision = self
-                .decide_tool_followup(&ctx.content, &memory_context, &tool_outputs)
+                .decide_tool_followup(
+                    &ctx.content,
+                    &memory_context,
+                    &selected_skills,
+                    &tool_outputs,
+                )
                 .await;
             let followup_ms = elapsed_ms(followup_started_at);
             planner_ms = planner_ms.saturating_add(followup_ms);
@@ -278,6 +312,7 @@ impl DefaultChatOrchestrator {
                         system_prompt: build_system_prompt(
                             &memory_context,
                             system_prompt_override.as_deref(),
+                            &selected_skills,
                         ),
                         user_prompt: ctx.content.clone(),
                     })
@@ -293,7 +328,7 @@ impl DefaultChatOrchestrator {
                         system_prompt: format!(
                             "{}You are CompanionPilot. Use the provided tool outputs to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
                             custom_prompt_header,
-                            build_recent_context_block(&memory_context.recent_messages)
+                            build_support_context_block(&memory_context, &selected_skills)
                         ),
                         user_prompt: format!(
                             "User request:\n{}\n\nTool outputs:\n{}",
@@ -409,12 +444,67 @@ impl DefaultChatOrchestrator {
         Ok(reply)
     }
 
+    async fn decide_selected_skills(
+        &self,
+        user_input: &str,
+        memory: &crate::types::MemoryContext,
+    ) -> SkillSelectionDecision {
+        let skill_metadata = self.skills.metadata_inventory();
+        let selector_prompt = build_skill_selector_prompt(memory, &skill_metadata);
+        let selector_result = self
+            .model
+            .complete(ModelRequest {
+                system_prompt: selector_prompt,
+                user_prompt: user_input.to_owned(),
+            })
+            .await;
+
+        let selector_result = match selector_result {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(?error, "skill selector model call failed");
+                return SkillSelectionDecision::Fallback {
+                    reason: "skill_selector_model_error",
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+
+        match parse_skill_selection_plan(&selector_result) {
+            Ok(plan) => {
+                let selected_skill_ids = self.skills.sanitize_selected_ids(plan.selected_skills);
+                let rationale = if plan.rationale.trim().is_empty() {
+                    "model_skill_selector".to_owned()
+                } else {
+                    plan.rationale.trim().to_owned()
+                };
+
+                SkillSelectionDecision::UseSelection {
+                    rationale,
+                    selected_skill_ids,
+                }
+            }
+            Err(error) => {
+                warn!(
+                    ?error,
+                    selector_output = %truncate_for_log(&selector_result, 220),
+                    "failed to parse skill selector output"
+                );
+                SkillSelectionDecision::Fallback {
+                    reason: "skill_selector_parse_error",
+                    error: Some(error.to_string()),
+                }
+            }
+        }
+    }
+
     async fn decide_unified_plan(
         &self,
         user_input: &str,
         memory: &crate::types::MemoryContext,
+        selected_skills: &[SkillDefinition],
     ) -> UnifiedPlanDecision {
-        let planner_prompt = build_unified_planner_prompt(memory);
+        let planner_prompt = build_unified_planner_prompt(memory, selected_skills);
         let planner_result = self
             .model
             .complete(ModelRequest {
@@ -477,9 +567,10 @@ impl DefaultChatOrchestrator {
         &self,
         user_input: &str,
         memory: &crate::types::MemoryContext,
+        selected_skills: &[SkillDefinition],
         tool_outputs: &[ExecutedToolOutput],
     ) -> ToolFollowupDecision {
-        let planner_prompt = build_tool_followup_prompt(memory);
+        let planner_prompt = build_tool_followup_prompt(memory, selected_skills);
         let planner_result = self
             .model
             .complete(ModelRequest {
@@ -584,8 +675,6 @@ impl DefaultChatOrchestrator {
     async fn execute_planned_tool_calls(
         &self,
         ctx: &MessageCtx,
-        user_input: &str,
-        memory_context: &MemoryContext,
         planned_tool_calls: Vec<ToolCall>,
         source: &'static str,
         executed_tool_calls: &mut Vec<ToolCall>,
@@ -597,17 +686,7 @@ impl DefaultChatOrchestrator {
             let tool_started_at = Instant::now();
             let tool_name = tool_call.tool_name;
             let planned_args = tool_call.args.clone();
-            let args = self
-                .refine_selected_tool_args(
-                    ctx,
-                    user_input,
-                    memory_context,
-                    source,
-                    &tool_name,
-                    &planned_args,
-                    tool_outputs,
-                )
-                .await;
+            let args = planned_args.clone();
             executed_tool_calls.push(ToolCall {
                 tool_name: tool_name.clone(),
                 args: args.clone(),
@@ -710,173 +789,6 @@ impl DefaultChatOrchestrator {
         }
     }
 
-    async fn refine_selected_tool_args(
-        &self,
-        ctx: &MessageCtx,
-        user_input: &str,
-        memory_context: &MemoryContext,
-        source: &'static str,
-        tool_name: &str,
-        planned_args: &Value,
-        tool_outputs: &[ExecutedToolOutput],
-    ) -> Value {
-        let Some(skill) = get_tool_skill(tool_name) else {
-            return planned_args.clone();
-        };
-        let refinement_started_at = Instant::now();
-
-        let refinement_prompt = build_tool_arg_refinement_prompt(
-            tool_name,
-            skill.markdown,
-            memory_context,
-            tool_outputs,
-        );
-        let refinement_result = self
-            .model
-            .complete(ModelRequest {
-                system_prompt: refinement_prompt,
-                user_prompt: format!(
-                    "User request:\n{}\n\nSelected tool:\n{}\n\nPlanned args JSON:\n{}",
-                    user_input, tool_name, planned_args
-                ),
-            })
-            .await;
-
-        let refinement_result = match refinement_result {
-            Ok(content) => content,
-            Err(error) => {
-                let error_text = error.to_string();
-                let duration_ms = elapsed_ms(refinement_started_at);
-                self.record_tool_arg_refinement_decision(
-                    ctx,
-                    source,
-                    tool_name,
-                    "fallback_planned_args",
-                    "model_error".to_owned(),
-                    json!({
-                        "planned_args": planned_args,
-                        "reason": "model_error"
-                    }),
-                    false,
-                    Some(error_text.clone()),
-                    duration_ms,
-                )
-                .await;
-                warn!(
-                    ?error,
-                    user_id = %ctx.user_id,
-                    planner_source = source,
-                    tool_name,
-                    "tool arg refinement model call failed; using planned args"
-                );
-                return planned_args.clone();
-            }
-        };
-
-        let refinement_plan = match parse_tool_arg_refinement(&refinement_result) {
-            Ok(plan) => plan,
-            Err(error) => {
-                let duration_ms = elapsed_ms(refinement_started_at);
-                let truncated_output = truncate_for_log(&refinement_result, 220);
-                self.record_tool_arg_refinement_decision(
-                    ctx,
-                    source,
-                    tool_name,
-                    "fallback_planned_args",
-                    "parse_error".to_owned(),
-                    json!({
-                        "planned_args": planned_args,
-                        "reason": "parse_error",
-                        "refinement_output": truncated_output
-                    }),
-                    false,
-                    Some(error.to_string()),
-                    duration_ms,
-                )
-                .await;
-                warn!(
-                    ?error,
-                    refinement_output = %truncate_for_log(&refinement_result, 220),
-                    user_id = %ctx.user_id,
-                    planner_source = source,
-                    tool_name,
-                    "tool arg refinement output parse failed; using planned args"
-                );
-                return planned_args.clone();
-            }
-        };
-
-        let Some(refined_args) = sanitize_single_tool_call_args(tool_name, refinement_plan.args)
-        else {
-            let duration_ms = elapsed_ms(refinement_started_at);
-            self.record_tool_arg_refinement_decision(
-                ctx,
-                source,
-                tool_name,
-                "fallback_planned_args",
-                "invalid_refined_args".to_owned(),
-                json!({
-                    "planned_args": planned_args,
-                    "reason": "invalid_refined_args"
-                }),
-                false,
-                Some("invalid_refined_args".to_owned()),
-                duration_ms,
-            )
-            .await;
-            warn!(
-                user_id = %ctx.user_id,
-                planner_source = source,
-                tool_name,
-                "tool arg refinement produced invalid args; using planned args"
-            );
-            return planned_args.clone();
-        };
-
-        let args_changed = refined_args != *planned_args;
-        let duration_ms = elapsed_ms(refinement_started_at);
-        let decision = if args_changed {
-            "apply_refined_args"
-        } else {
-            "keep_planned_args"
-        };
-        self.record_tool_arg_refinement_decision(
-            ctx,
-            source,
-            tool_name,
-            decision,
-            refinement_plan.rationale.clone(),
-            json!({
-                "planned_args": planned_args,
-                "refined_args": refined_args.clone(),
-                "args_changed": args_changed
-            }),
-            true,
-            None,
-            duration_ms,
-        )
-        .await;
-        if args_changed {
-            info!(
-                user_id = %ctx.user_id,
-                planner_source = source,
-                tool_name,
-                rationale = %refinement_plan.rationale,
-                "tool args refined by tool skill"
-            );
-        } else {
-            debug!(
-                user_id = %ctx.user_id,
-                planner_source = source,
-                tool_name,
-                rationale = %refinement_plan.rationale,
-                "tool arg refinement kept planned args"
-            );
-        }
-
-        refined_args
-    }
-
     async fn record_tool_call(&self, call: ToolCallRecord) {
         if let Err(error) = self.memory.record_tool_call(call).await {
             warn!(?error, "failed to persist tool call log");
@@ -905,6 +817,48 @@ impl DefaultChatOrchestrator {
         self.record_planner_decision(
             ctx,
             "unified",
+            decision_value,
+            rationale,
+            payload,
+            success,
+            error,
+            duration_ms,
+        )
+        .await;
+    }
+
+    async fn record_skill_selector_decision(
+        &self,
+        ctx: &MessageCtx,
+        decision: &SkillSelectionDecision,
+        duration_ms: u64,
+    ) {
+        let (decision_value, rationale, payload, success, error) = match decision {
+            SkillSelectionDecision::UseSelection {
+                rationale,
+                selected_skill_ids,
+            } => (
+                "apply_selection",
+                rationale.clone(),
+                json!({
+                    "selected_skills": selected_skill_ids,
+                    "rationale": rationale,
+                }),
+                true,
+                None,
+            ),
+            SkillSelectionDecision::Fallback { reason, error } => (
+                "fallback_empty_selection",
+                (*reason).to_owned(),
+                json!({}),
+                false,
+                error.clone(),
+            ),
+        };
+
+        self.record_planner_decision(
+            ctx,
+            "skill_selector",
             decision_value,
             rationale,
             payload,
@@ -966,35 +920,6 @@ impl DefaultChatOrchestrator {
         .await;
     }
 
-    async fn record_tool_arg_refinement_decision(
-        &self,
-        ctx: &MessageCtx,
-        source: &str,
-        tool_name: &str,
-        decision: &str,
-        rationale: String,
-        payload: Value,
-        success: bool,
-        error: Option<String>,
-        duration_ms: u64,
-    ) {
-        self.record_planner_decision(
-            ctx,
-            "tool_arg_refinement",
-            decision,
-            rationale,
-            json!({
-                "source": source,
-                "tool_name": tool_name,
-                "decision": payload
-            }),
-            success,
-            error,
-            duration_ms,
-        )
-        .await;
-    }
-
     async fn record_planner_decision(
         &self,
         ctx: &MessageCtx,
@@ -1044,8 +969,41 @@ impl VoiceReplyOrchestrator for DefaultChatOrchestrator {
     }
 }
 
-fn build_unified_planner_prompt(memory: &crate::types::MemoryContext) -> String {
+const SELECTED_SKILL_LIMIT: usize = 5;
+const SELECTED_SKILL_BODY_MAX_CHARS: usize = 1_200;
+
+fn build_skill_selector_prompt(
+    memory: &crate::types::MemoryContext,
+    skill_metadata: &[SkillMetadata],
+) -> String {
     let context_block = build_planner_context_block(memory);
+    let skill_inventory = build_skill_inventory_for_selector(skill_metadata);
+
+    format!(
+        "You are the skill selector for CompanionPilot.
+Select zero or more skills relevant to the current user request.
+Return strict JSON only (no markdown, no prose) with this exact schema:
+{{
+  \"selected_skills\": [\"skill-id\", \"...\"],
+  \"rationale\": \"short reason\"
+}}
+Rules:
+- Choose only skill IDs from the provided inventory.
+- Use only inventory metadata (id/title/description/tags) for selection.
+- Do not invent IDs.
+- It is valid to return an empty selected_skills array.
+Available skills:
+{}
+{}",
+        skill_inventory, context_block
+    )
+}
+
+fn build_unified_planner_prompt(
+    memory: &crate::types::MemoryContext,
+    selected_skills: &[SkillDefinition],
+) -> String {
+    let context_block = build_support_context_block(memory, selected_skills);
 
     format!(
         "You are the unified planner for CompanionPilot.
@@ -1081,8 +1039,11 @@ Tool inventory:
     )
 }
 
-fn build_tool_followup_prompt(memory: &crate::types::MemoryContext) -> String {
-    let context_block = build_planner_context_block(memory);
+fn build_tool_followup_prompt(
+    memory: &crate::types::MemoryContext,
+    selected_skills: &[SkillDefinition],
+) -> String {
+    let context_block = build_support_context_block(memory, selected_skills);
 
     format!(
         "You are the tool follow-up planner for CompanionPilot.
@@ -1110,39 +1071,75 @@ Tool inventory:
     )
 }
 
-fn build_tool_arg_refinement_prompt(
-    tool_name: &str,
-    tool_skill_markdown: &str,
-    memory: &MemoryContext,
-    tool_outputs: &[ExecutedToolOutput],
+fn build_support_context_block(
+    memory: &crate::types::MemoryContext,
+    selected_skills: &[SkillDefinition],
 ) -> String {
-    let context_block = build_planner_context_block(memory);
-    let previous_outputs_block = if tool_outputs.is_empty() {
-        "No prior tool outputs in this request yet.".to_owned()
-    } else {
-        format!("Prior tool outputs:\n{}", format_tool_outputs(tool_outputs))
-    };
+    let mut sections = Vec::new();
+    let planner_context = build_planner_context_block(memory);
+    if !planner_context.is_empty() {
+        sections.push(planner_context.trim().to_owned());
+    }
+    let selected_skills_block = build_selected_skill_context_block(selected_skills);
+    if !selected_skills_block.is_empty() {
+        sections.push(selected_skills_block);
+    }
 
-    format!(
-        "You are the tool argument refiner for CompanionPilot.
-The tool is pre-selected and cannot be changed.
-Return strict JSON only (no markdown, no prose) with this schema:
-{{
-  \"args\": {},
-  \"rationale\": \"kept planned args unchanged\"
-}}
-Rules:
-- Keep tool_name fixed to \"{}\".
-- Use the Tool Skill details to produce valid and minimal args for this tool.
-- If planned args are already valid, return them unchanged.
-- Never output tool calls; only output the refined args object.
-- Never emit markdown/code fences.
-Tool Skill:
-{}
-{}
-{}",
-        "{}", tool_name, tool_skill_markdown, context_block, previous_outputs_block
-    )
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", sections.join("\n\n"))
+    }
+}
+
+fn build_skill_inventory_for_selector(skill_metadata: &[SkillMetadata]) -> String {
+    let inventory = skill_metadata
+        .iter()
+        .map(|skill| {
+            json!({
+                "id": &skill.id,
+                "title": &skill.title,
+                "description": &skill.description,
+                "tags": &skill.tags,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_string_pretty(&inventory).unwrap_or_else(|_| "[]".to_owned())
+}
+
+fn build_selected_skill_context_block(selected_skills: &[SkillDefinition]) -> String {
+    if selected_skills.is_empty() {
+        return "Selected skills: none.".to_owned();
+    }
+
+    let lines = selected_skills
+        .iter()
+        .take(SELECTED_SKILL_LIMIT)
+        .enumerate()
+        .map(|(index, skill)| {
+            let tags = if skill.metadata.tags.is_empty() {
+                "none".to_owned()
+            } else {
+                skill.metadata.tags.join(", ")
+            };
+            format!(
+                "{}. id={}\n   title={}\n   description={}\n   tags={}\n   markdown:\n{}",
+                index + 1,
+                skill.metadata.id,
+                skill.metadata.title,
+                skill.metadata.description,
+                tags,
+                indent_block(&truncate_for_prompt(
+                    &skill.body_markdown,
+                    SELECTED_SKILL_BODY_MAX_CHARS
+                ))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("Selected skills guidance:\n{lines}")
 }
 
 fn build_planner_context_block(memory: &crate::types::MemoryContext) -> String {
@@ -1223,7 +1220,7 @@ fn parse_tool_followup_plan(raw: &str) -> Result<ToolFollowupPlan, serde_json::E
     parse_json_plan(raw)
 }
 
-fn parse_tool_arg_refinement(raw: &str) -> Result<ToolArgRefinement, serde_json::Error> {
+fn parse_skill_selection_plan(raw: &str) -> Result<SkillSelectionPlan, serde_json::Error> {
     parse_json_plan(raw)
 }
 
@@ -1232,17 +1229,6 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
         .into_iter()
         .filter_map(sanitize_planned_tool_call)
         .collect()
-}
-
-fn sanitize_single_tool_call_args(tool_name: &str, args: Value) -> Option<Value> {
-    let sanitized_call = sanitize_planned_tool_call(PlannedToolCall {
-        tool_name: tool_name.to_owned(),
-        args,
-    })?;
-    if sanitized_call.tool_name != tool_name {
-        return None;
-    }
-    Some(sanitized_call.args)
 }
 
 fn sanitize_planned_tool_call(planned_call: PlannedToolCall) -> Option<ToolCall> {
@@ -1399,6 +1385,25 @@ fn truncate_for_log(input: &str, max_len: usize) -> String {
     result
 }
 
+fn truncate_for_prompt(input: &str, max_len: usize) -> String {
+    if input.len() <= max_len {
+        return input.to_owned();
+    }
+
+    let safe_len = input.floor_char_boundary(max_len);
+    let mut truncated = input[..safe_len].to_owned();
+    truncated.push_str("...");
+    truncated
+}
+
+fn indent_block(input: &str) -> String {
+    input
+        .lines()
+        .map(|line| format!("      {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn elapsed_ms(started_at: Instant) -> u64 {
     started_at
         .elapsed()
@@ -1549,6 +1554,7 @@ pub fn default_system_prompt_base() -> &'static str {
 fn build_system_prompt(
     memory: &crate::types::MemoryContext,
     override_prompt: Option<&str>,
+    selected_skills: &[SkillDefinition],
 ) -> String {
     let mut sections = if let Some(prompt) = override_prompt {
         vec![prompt.to_owned()]
@@ -1573,6 +1579,8 @@ fn build_system_prompt(
             .join("; ");
         sections.push(format!("Known user facts: {lines}"));
     }
+
+    sections.push(build_selected_skill_context_block(selected_skills));
 
     sections.join("\n")
 }
@@ -1605,7 +1613,11 @@ fn clean_memory_value(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use async_trait::async_trait;
     use chrono::Utc;
@@ -1615,6 +1627,7 @@ mod tests {
         memory::{InMemoryMemoryStore, MemoryStore},
         model::{MockModelProvider, ModelProvider, ModelRequest},
         safety::SafetyPolicy,
+        skills::SkillCatalog,
         tools::{ToolExecutor, ToolRegistry, ToolResult},
         types::{MessageCtx, ToolCall},
     };
@@ -1622,8 +1635,40 @@ mod tests {
     use super::{
         DefaultChatOrchestrator, PlannedToolCall, clean_memory_value,
         enforce_datetime_planning_boundary, parse_unified_plan, sanitize_memory_key,
-        sanitize_planned_tool_calls, sanitize_single_tool_call_args, truncate_for_log,
+        sanitize_planned_tool_calls, truncate_for_log,
     };
+
+    fn empty_skill_catalog() -> Arc<SkillCatalog> {
+        Arc::new(SkillCatalog::default())
+    }
+
+    fn test_skill_catalog_with_marker() -> Arc<SkillCatalog> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "companionpilot-orchestrator-skills-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp skill directory should be created");
+        fs::write(
+            temp_dir.join("focus.md"),
+            r#"---
+id: focus-skill
+title: Focus Skill
+description: Keep attention on key points.
+tags: [focus, testing]
+---
+THIS_BODY_MARKER_SHOULD_NOT_APPEAR_IN_SELECTOR
+"#,
+        )
+        .expect("skill file should be written");
+
+        let catalog = SkillCatalog::load_from_dir(&temp_dir).expect("skill catalog should load");
+        let _ = fs::remove_dir_all(temp_dir);
+        Arc::new(catalog)
+    }
 
     #[derive(Debug, Default)]
     struct FollowupLoopModelProvider;
@@ -1696,119 +1741,78 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct RefinementSuccessModelProvider;
-
-    #[async_trait]
-    impl ModelProvider for RefinementSuccessModelProvider {
-        async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
-            if request
-                .system_prompt
-                .contains("You are the unified planner for CompanionPilot.")
-            {
-                return Ok(json!({
-                    "tool_calls": [
-                        {
-                            "tool_name": "web_search",
-                            "args": {
-                                "query": "alpha",
-                                "max_results": 3
-                            }
-                        }
-                    ],
-                    "memory": {
-                        "store": false,
-                        "key": "",
-                        "value": "",
-                        "confidence": 0.0
-                    },
-                    "rationale": "initial tool choice"
-                })
-                .to_string());
-            }
-
-            if request
-                .system_prompt
-                .contains("You are the tool argument refiner for CompanionPilot.")
-            {
-                return Ok(json!({
-                    "args": {
-                        "query": "beta",
-                        "max_results": 2
-                    },
-                    "rationale": "more specific query"
-                })
-                .to_string());
-            }
-
-            if request
-                .system_prompt
-                .contains("You are the tool follow-up planner for CompanionPilot.")
-            {
-                return Ok(json!({
-                    "action": "final",
-                    "final_answer": "done",
-                    "tool_calls": [],
-                    "rationale": "enough evidence"
-                })
-                .to_string());
-            }
-
-            Ok("fallback final synthesis".to_owned())
-        }
+    struct SkillSelectionContractModelProvider {
+        stages: Mutex<Vec<String>>,
     }
 
-    #[derive(Debug, Default)]
-    struct RefinementInvalidModelProvider;
-
     #[async_trait]
-    impl ModelProvider for RefinementInvalidModelProvider {
+    impl ModelProvider for SkillSelectionContractModelProvider {
         async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+            if request
+                .system_prompt
+                .contains("You are the skill selector for CompanionPilot.")
+            {
+                assert!(
+                    !request
+                        .system_prompt
+                        .contains("THIS_BODY_MARKER_SHOULD_NOT_APPEAR_IN_SELECTOR"),
+                    "selector prompt must not include markdown body"
+                );
+                self.stages
+                    .lock()
+                    .expect("stages lock should succeed")
+                    .push("selector".to_owned());
+                return Ok(json!({
+                    "selected_skills": ["focus-skill", "unknown-skill"],
+                    "rationale": "metadata match"
+                })
+                .to_string());
+            }
+
             if request
                 .system_prompt
                 .contains("You are the unified planner for CompanionPilot.")
             {
+                let stages = self.stages.lock().expect("stages lock should succeed");
+                assert_eq!(
+                    stages.first().map(String::as_str),
+                    Some("selector"),
+                    "selector stage must run before unified planner"
+                );
+                drop(stages);
+
+                assert!(
+                    request.system_prompt.contains("Selected skills guidance:"),
+                    "unified planner should receive selected skill guidance"
+                );
+                assert!(
+                    request
+                        .system_prompt
+                        .contains("THIS_BODY_MARKER_SHOULD_NOT_APPEAR_IN_SELECTOR"),
+                    "selected skill body should be available in unified planning stages"
+                );
                 return Ok(json!({
-                    "tool_calls": [
-                        {
-                            "tool_name": "web_search",
-                            "args": {
-                                "query": "alpha",
-                                "max_results": 3
-                            }
-                        }
-                    ],
+                    "tool_calls": [],
                     "memory": {
                         "store": false,
                         "key": "",
                         "value": "",
                         "confidence": 0.0
                     },
-                    "rationale": "initial tool choice"
+                    "rationale": "no tools needed"
                 })
                 .to_string());
             }
 
-            if request
-                .system_prompt
-                .contains("You are the tool argument refiner for CompanionPilot.")
-            {
-                return Ok("not-json".to_owned());
-            }
-
-            if request
-                .system_prompt
-                .contains("You are the tool follow-up planner for CompanionPilot.")
-            {
-                return Ok(json!({
-                    "action": "final",
-                    "final_answer": "done",
-                    "tool_calls": [],
-                    "rationale": "enough evidence"
-                })
-                .to_string());
-            }
-
-            Ok("fallback final synthesis".to_owned())
+            self.stages
+                .lock()
+                .expect("stages lock should succeed")
+                .push("final".to_owned());
+            assert!(
+                request.system_prompt.contains("Selected skills guidance:"),
+                "final synthesis prompt should include selected skill guidance"
+            );
+            Ok("selector contract ok".to_owned())
         }
     }
 
@@ -1846,6 +1850,7 @@ mod tests {
             Arc::new(MockModelProvider),
             memory.clone(),
             Arc::new(ToolRegistry::default()),
+            empty_skill_catalog(),
             SafetyPolicy::default(),
         );
 
@@ -1876,6 +1881,7 @@ mod tests {
             Arc::new(MockModelProvider),
             memory,
             Arc::new(ToolRegistry::default()),
+            empty_skill_catalog(),
             SafetyPolicy::default(),
         );
 
@@ -1901,6 +1907,7 @@ mod tests {
             Arc::new(MockModelProvider),
             memory.clone(),
             Arc::new(ToolRegistry::default()),
+            empty_skill_catalog(),
             SafetyPolicy::default(),
         );
 
@@ -1929,6 +1936,7 @@ mod tests {
             Arc::new(FollowupLoopModelProvider),
             memory,
             Arc::new(StubWebSearchToolExecutor),
+            empty_skill_catalog(),
             SafetyPolicy::default(),
         );
 
@@ -1954,12 +1962,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_arg_refinement_can_update_args_before_execution() {
+    async fn skill_selector_uses_metadata_only_and_runs_before_unified_planner() {
         let memory = Arc::new(InMemoryMemoryStore::default());
         let orchestrator = DefaultChatOrchestrator::new(
-            Arc::new(RefinementSuccessModelProvider),
+            Arc::new(SkillSelectionContractModelProvider::default()),
             memory.clone(),
-            Arc::new(StubWebSearchToolExecutor),
+            Arc::new(ToolRegistry::default()),
+            test_skill_catalog_with_marker(),
             SafetyPolicy::default(),
         );
 
@@ -1969,66 +1978,35 @@ mod tests {
                 user_id: "u3c".into(),
                 guild_id: "g1".into(),
                 channel_id: "c1".into(),
-                content: "search the web for a better query".into(),
+                content: "focus and summarize this".into(),
                 timestamp: Utc::now(),
             })
             .await
-            .expect("refined tool call should complete");
+            .expect("selector-first pipeline should complete");
 
-        assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(result.tool_calls[0].tool_name, "web_search");
-        assert_eq!(result.tool_calls[0].args["query"], "beta");
-        assert_eq!(result.tool_calls[0].args["max_results"], 2);
-        assert_eq!(result.text, "done");
+        assert_eq!(result.text, "selector contract ok");
+        assert!(result.tool_calls.is_empty());
 
         let decisions = memory
             .list_planner_decisions("u3c", 20)
             .await
             .expect("planner decisions should list");
-        assert!(decisions.iter().any(|decision| {
-            decision.planner == "tool_arg_refinement"
-                && decision.decision == "apply_refined_args"
-                && decision.success
-        }));
-    }
 
-    #[tokio::test]
-    async fn tool_arg_refinement_failure_falls_back_to_planned_args() {
-        let memory = Arc::new(InMemoryMemoryStore::default());
-        let orchestrator = DefaultChatOrchestrator::new(
-            Arc::new(RefinementInvalidModelProvider),
-            memory.clone(),
-            Arc::new(StubWebSearchToolExecutor),
-            SafetyPolicy::default(),
-        );
+        let skill_selector_decision = decisions
+            .iter()
+            .find(|decision| decision.planner == "skill_selector")
+            .expect("skill selector decision should be logged");
+        assert_eq!(skill_selector_decision.decision, "apply_selection");
 
-        let result = orchestrator
-            .handle_message(MessageCtx {
-                message_id: "3d".into(),
-                user_id: "u3d".into(),
-                guild_id: "g1".into(),
-                channel_id: "c1".into(),
-                content: "search the web with fallback".into(),
-                timestamp: Utc::now(),
-            })
-            .await
-            .expect("fallback to planned args should complete");
-
-        assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(result.tool_calls[0].tool_name, "web_search");
-        assert_eq!(result.tool_calls[0].args["query"], "alpha");
-        assert_eq!(result.tool_calls[0].args["max_results"], 3);
-        assert_eq!(result.text, "done");
-
-        let decisions = memory
-            .list_planner_decisions("u3d", 20)
-            .await
-            .expect("planner decisions should list");
-        assert!(decisions.iter().any(|decision| {
-            decision.planner == "tool_arg_refinement"
-                && decision.decision == "fallback_planned_args"
-                && !decision.success
-        }));
+        let payload: Value = serde_json::from_str(&skill_selector_decision.payload_json)
+            .expect("skill selector payload should be valid JSON");
+        let selected = payload["selected_skills"]
+            .as_array()
+            .expect("selected_skills should be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(selected, vec!["focus-skill"]);
     }
 
     #[tokio::test]
@@ -2038,6 +2016,7 @@ mod tests {
             Arc::new(MockModelProvider),
             memory.clone(),
             Arc::new(ToolRegistry::default()),
+            empty_skill_catalog(),
             SafetyPolicy::default(),
         );
 
@@ -2080,6 +2059,7 @@ mod tests {
             Arc::new(MockModelProvider),
             memory,
             Arc::new(ToolRegistry::default()),
+            empty_skill_catalog(),
             SafetyPolicy::default(),
         );
 
@@ -2205,40 +2185,6 @@ mod tests {
 
         let sanitized = sanitize_planned_tool_calls(planned_calls);
         assert!(sanitized.is_empty());
-    }
-
-    #[test]
-    fn sanitize_single_tool_call_args_accepts_valid_web_search() {
-        let sanitized = sanitize_single_tool_call_args(
-            "web_search",
-            json!({
-                "query": "rust async traits",
-                "max_results": 4
-            }),
-        )
-        .expect("valid web_search args should pass");
-
-        assert_eq!(sanitized["query"], "rust async traits");
-        assert_eq!(sanitized["max_results"], 4);
-    }
-
-    #[test]
-    fn sanitize_single_tool_call_args_rejects_invalid_web_search() {
-        let sanitized = sanitize_single_tool_call_args(
-            "web_search",
-            json!({
-                "query": "   ",
-                "max_results": 4
-            }),
-        );
-        assert!(sanitized.is_none());
-    }
-
-    #[test]
-    fn sanitize_single_tool_call_args_normalizes_cli_command() {
-        let sanitized = sanitize_single_tool_call_args("cli", json!({"command": "spogo -h"}))
-            .expect("cli command should be normalized");
-        assert_eq!(sanitized, json!({ "args": ["spogo", "-h"] }));
     }
 
     #[test]

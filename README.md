@@ -76,6 +76,9 @@ curl -X POST http://localhost:8080/chat \
 - Set `DISCORD_TOKEN` in `.env`.
 - DM the bot, mention it in guild channels, or configure `DISCORD_ALLOWED_CHANNEL_IDS` to let it respond in specific guild channels without mentions.
 - CompanionPilot decides tool usage automatically from a unified planner decision.
+- CompanionPilot now runs a skill selector before tool planning.
+- Skills are loaded at startup from repo-root `skills/` markdown files.
+- Selected skills guide planning and final synthesis, but do not force or block tool execution.
 - For time-sensitive requests, planner can call `current_datetime` before `web_search`.
 - For Spotify operations, planner uses `cli` with `command` (for example `spogo status` or `spogo search track muse`).
 - `cli` blocks any non-`spogo` command and returns a clear "not allowed" error.
@@ -98,6 +101,26 @@ curl -X POST http://localhost:8080/chat \
 ```bash
 spogo --config /data/spogo/config.toml auth import --cookie-path /path/to/cookies.txt
 ```
+
+## Runtime skills
+
+- Runtime skill files are loaded once at startup from `./skills`.
+- Skill files use YAML frontmatter and markdown body. Required frontmatter keys: `id`, `description`.
+- Example:
+
+```markdown
+---
+id: concise-response
+title: Concise Response Style
+description: Favor direct, concise user-facing answers.
+tags: [style, response]
+---
+Keep answers short unless the task requires depth.
+```
+
+- The skill selector sees only metadata (`id`, `title`, `description`, `tags`) when choosing skills.
+- Selected skills can provide markdown guidance to planner/synthesis prompts.
+- Changing files in `skills/` requires a process restart.
 
 ## Model provider selection
 

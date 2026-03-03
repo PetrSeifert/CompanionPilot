@@ -11,6 +11,17 @@ impl ModelProvider for MockModelProvider {
     async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
         if request
             .system_prompt
+            .contains("You are the skill selector for CompanionPilot.")
+        {
+            return Ok(json!({
+                "selected_skills": [],
+                "rationale": "mock_selector_default"
+            })
+            .to_string());
+        }
+
+        if request
+            .system_prompt
             .contains("You are the unified planner for CompanionPilot.")
         {
             let memory = if let Some(name) = extract_name(&request.user_prompt) {

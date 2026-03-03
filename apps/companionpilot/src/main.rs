@@ -12,6 +12,7 @@ use companionpilot_core::{
         RuntimeSettingsManager, RuntimeSettingsStore,
     },
     safety::SafetyPolicy,
+    skills::SkillCatalog,
     tools::{
         CliTool, CurrentDateTimeTool, SpogoCli, TavilyWebSearchTool, ToolExecutor, ToolRegistry,
     },
@@ -38,12 +39,22 @@ async fn main() -> anyhow::Result<()> {
         memory.clone(),
     );
     let tools = build_tools(&config, voice.clone());
+    let skills = Arc::new(SkillCatalog::load_from_dir("skills")?);
+    if skills.is_empty() {
+        warn!("No runtime skills loaded from ./skills; skill selector will run with empty catalog");
+    } else {
+        info!(
+            skill_count = skills.len(),
+            "Loaded runtime skills from ./skills"
+        );
+    }
 
     let memory_for_dashboard = memory.clone();
     let orchestrator = Arc::new(DefaultChatOrchestrator::new(
         model,
         memory,
         tools,
+        skills,
         SafetyPolicy::default(),
     ));
     if let Some(voice_manager) = &voice {

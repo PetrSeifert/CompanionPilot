@@ -1,7 +1,7 @@
 FROM golang:1.24-bookworm AS spogo-builder
 RUN CGO_ENABLED=0 go install github.com/steipete/spogo/cmd/spogo@latest
 
-FROM rust:1.88-slim AS builder
+FROM rust:1.91.0-slim-bookworm AS builder
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
