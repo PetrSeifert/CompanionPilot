@@ -30,8 +30,6 @@ use crate::{
     types::{MessageCtx, MessageLatencyRecord},
 };
 
-const DEFAULT_LISTEN_WINDOW_MS: u64 = 12_000;
-const DEFAULT_CHUNK_GAP_MS: u64 = 700;
 const MAX_TTS_INPUT_CHARS: usize = 4_000;
 
 #[derive(Debug, Clone)]
@@ -870,14 +868,6 @@ fn pcm_i16_to_wav_bytes(samples: &[i16], channels: u16, sample_rate: u32) -> Vec
     }
 
     wav
-}
-
-pub fn default_listen_window() -> Duration {
-    Duration::from_millis(DEFAULT_LISTEN_WINDOW_MS)
-}
-
-pub fn default_chunk_gap() -> Duration {
-    Duration::from_millis(DEFAULT_CHUNK_GAP_MS)
 }
 
 #[cfg(test)]
