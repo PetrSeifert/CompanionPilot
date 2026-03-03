@@ -56,9 +56,6 @@ async fn main() -> anyhow::Result<()> {
         warn!("DISCORD_TOKEN is not set; Discord bot is disabled");
     }
 
-    if config.redis_url.is_none() {
-        warn!("REDIS_URL is not configured; using stateless in-process cache only");
-    }
     if config.api_auth_token.is_none() {
         warn!(
             "API_AUTH_TOKEN is not configured; protected HTTP endpoints will return 503 until configured"
