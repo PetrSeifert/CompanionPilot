@@ -74,7 +74,7 @@ curl -X POST http://localhost:8080/chat \
 ## Discord usage
 
 - Set `DISCORD_TOKEN` in `.env`.
-- Mention the bot or DM it.
+- DM the bot, mention it in guild channels, or configure `DISCORD_ALLOWED_CHANNEL_IDS` to let it respond in specific guild channels without mentions.
 - CompanionPilot decides tool usage automatically from a unified planner decision.
 - For time-sensitive requests, planner can call `current_datetime` before `web_search`.
 - For Spotify operations, planner uses `cli` with `command` (for example `spogo status` or `spogo search track muse`).

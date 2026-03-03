@@ -80,12 +80,15 @@ impl EventHandler for Handler {
         let runtime_settings = self.runtime_settings.get().await;
         let allowed_channel_ids =
             parse_allowed_channel_ids(&runtime_settings.discord_allowed_channel_ids);
+        let allowlist_enabled = !allowed_channel_ids.is_empty();
         let channel_allowed =
-            allowed_channel_ids.is_empty() || allowed_channel_ids.contains(&msg.channel_id.get());
-        if !is_direct_message && !channel_allowed {
-            return;
-        }
-        if !is_direct_message && !mentions_bot {
+            !allowlist_enabled || allowed_channel_ids.contains(&msg.channel_id.get());
+        if !should_process_message(
+            is_direct_message,
+            mentions_bot,
+            channel_allowed,
+            allowlist_enabled,
+        ) {
             return;
         }
 
@@ -217,6 +220,23 @@ pub fn parse_allowed_channel_ids(raw: &str) -> HashSet<u64> {
         .collect()
 }
 
+fn should_process_message(
+    is_direct_message: bool,
+    mentions_bot: bool,
+    channel_allowed: bool,
+    allowlist_enabled: bool,
+) -> bool {
+    if is_direct_message {
+        return true;
+    }
+
+    if !channel_allowed {
+        return false;
+    }
+
+    mentions_bot || allowlist_enabled
+}
+
 fn split_message_for_discord(text: &str, max_chars: usize) -> Vec<&str> {
     if text.is_empty() || max_chars == 0 {
         return Vec::new();
@@ -244,7 +264,10 @@ fn split_message_for_discord(text: &str, max_chars: usize) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DISCORD_MESSAGE_MAX_CHARS, parse_allowed_channel_ids, split_message_for_discord};
+    use super::{
+        DISCORD_MESSAGE_MAX_CHARS, parse_allowed_channel_ids, should_process_message,
+        split_message_for_discord,
+    };
 
     #[test]
     fn split_message_for_discord_enforces_limit() {
@@ -279,5 +302,22 @@ mod tests {
         let ids = parse_allowed_channel_ids("123,abc,, -5");
         assert_eq!(ids.len(), 1);
         assert!(ids.contains(&123));
+    }
+
+    #[test]
+    fn should_process_message_allows_direct_messages() {
+        assert!(should_process_message(true, false, false, false));
+    }
+
+    #[test]
+    fn should_process_message_requires_mention_without_allowlist() {
+        assert!(!should_process_message(false, false, true, false));
+        assert!(should_process_message(false, true, true, false));
+    }
+
+    #[test]
+    fn should_process_message_allows_allowlisted_channels_without_mention() {
+        assert!(should_process_message(false, false, true, true));
+        assert!(!should_process_message(false, false, false, true));
     }
 }
