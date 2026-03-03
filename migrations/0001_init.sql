@@ -1,12 +1,9 @@
-CREATE EXTENSION IF NOT EXISTS vector;
-
 CREATE TABLE IF NOT EXISTS memory_facts (
     user_id TEXT NOT NULL,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
     confidence REAL NOT NULL DEFAULT 0.5,
     source TEXT NOT NULL DEFAULT 'unknown',
-    embedding vector(1536),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, key)
 );
