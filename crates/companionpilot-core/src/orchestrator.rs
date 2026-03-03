@@ -1598,9 +1598,6 @@ fn clean_memory_value(value: &str) -> String {
     value
         .trim()
         .trim_matches(|character: char| character == '"' || character == '\'')
-        .trim_end_matches(|character: char| {
-            character == '.' || character == '!' || character == '?'
-        })
         .trim()
         .to_owned()
 }
@@ -1924,8 +1921,8 @@ mod tests {
     }
 
     #[test]
-    fn clean_memory_value_trims_wrappers() {
-        assert_eq!(clean_memory_value("\"Petr.\""), "Petr");
+    fn clean_memory_value_trims_wrappers_and_preserves_punctuation() {
+        assert_eq!(clean_memory_value("\"Petr.\""), "Petr.");
     }
 
     #[test]
