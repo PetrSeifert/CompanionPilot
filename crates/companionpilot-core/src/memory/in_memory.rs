@@ -17,6 +17,12 @@ use crate::types::{
 
 use super::MemoryStore;
 
+const MAX_FACTS_PER_USER: usize = 512;
+const MAX_CHAT_MESSAGES_PER_USER: usize = 2_048;
+const MAX_TOOL_CALLS_PER_USER: usize = 1_024;
+const MAX_PLANNER_DECISIONS_PER_USER: usize = 1_024;
+const MAX_MESSAGE_LATENCIES_PER_USER: usize = 2_048;
+
 #[derive(Debug)]
 pub struct InMemoryMemoryStore {
     facts: Arc<RwLock<HashMap<String, Vec<MemoryFact>>>>,
@@ -91,6 +97,7 @@ impl MemoryStore for InMemoryMemoryStore {
         } else {
             user_facts.push(fact);
         }
+        prune_oldest_by(user_facts, MAX_FACTS_PER_USER, |entry| entry.updated_at);
 
         Ok(())
     }
@@ -148,7 +155,9 @@ impl MemoryStore for InMemoryMemoryStore {
             let id = self.chat_seq.fetch_add(1, Ordering::Relaxed);
             message.id = format!("local-{id}");
         }
-        chats.entry(user_id).or_default().push(message);
+        let entries = chats.entry(user_id).or_default();
+        entries.push(message);
+        prune_oldest_by(entries, MAX_CHAT_MESSAGES_PER_USER, |entry| entry.timestamp);
         Ok(())
     }
 
@@ -267,7 +276,9 @@ impl MemoryStore for InMemoryMemoryStore {
     async fn record_tool_call(&self, tool_call: ToolCallRecord) -> anyhow::Result<()> {
         let user_id = tool_call.user_id.clone();
         let mut tool_calls = self.tool_calls.write().await;
-        tool_calls.entry(user_id).or_default().push(tool_call);
+        let entries = tool_calls.entry(user_id).or_default();
+        entries.push(tool_call);
+        prune_oldest_by(entries, MAX_TOOL_CALLS_PER_USER, |entry| entry.timestamp);
         Ok(())
     }
 
@@ -294,7 +305,9 @@ impl MemoryStore for InMemoryMemoryStore {
     async fn record_planner_decision(&self, decision: PlannerDecisionRecord) -> anyhow::Result<()> {
         let user_id = decision.user_id.clone();
         let mut decisions = self.planner_decisions.write().await;
-        decisions.entry(user_id).or_default().push(decision);
+        let entries = decisions.entry(user_id).or_default();
+        entries.push(decision);
+        prune_oldest_by(entries, MAX_PLANNER_DECISIONS_PER_USER, |entry| entry.timestamp);
         Ok(())
     }
 
@@ -335,6 +348,7 @@ impl MemoryStore for InMemoryMemoryStore {
         } else {
             entries.push(latency);
         }
+        prune_oldest_by(entries, MAX_MESSAGE_LATENCIES_PER_USER, |entry| entry.timestamp);
         Ok(())
     }
 
@@ -365,5 +379,85 @@ impl MemoryStore for InMemoryMemoryStore {
             .map(|list| list.len() as u64)
             .unwrap_or(0);
         Ok(removed)
+    }
+}
+
+fn prune_oldest_by<T, F>(entries: &mut Vec<T>, max_len: usize, mut timestamp_of: F)
+where
+    F: FnMut(&T) -> chrono::DateTime<chrono::Utc>,
+{
+    if entries.len() <= max_len {
+        return;
+    }
+    entries.sort_by_key(|entry| timestamp_of(entry));
+    let excess = entries.len().saturating_sub(max_len);
+    entries.drain(0..excess);
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+
+    use crate::{
+        memory::MemoryStore,
+        types::{ChatMessageRecord, ChatRole, MemoryFact},
+    };
+
+    use super::{InMemoryMemoryStore, MAX_CHAT_MESSAGES_PER_USER, MAX_FACTS_PER_USER};
+
+    #[tokio::test]
+    async fn record_chat_message_prunes_oldest_entries() {
+        let store = InMemoryMemoryStore::default();
+        let base = Utc::now();
+        for idx in 0..(MAX_CHAT_MESSAGES_PER_USER + 3) {
+            store
+                .record_chat_message(ChatMessageRecord {
+                    id: format!("m-{idx}"),
+                    user_id: "u1".to_owned(),
+                    guild_id: "g1".to_owned(),
+                    channel_id: "c1".to_owned(),
+                    role: ChatRole::User,
+                    content: format!("message {idx}"),
+                    timestamp: base + Duration::milliseconds(idx as i64),
+                })
+                .await
+                .expect("chat message should record");
+        }
+
+        let messages = store
+            .list_chat_messages("u1", usize::MAX)
+            .await
+            .expect("chat messages should list");
+        assert_eq!(messages.len(), MAX_CHAT_MESSAGES_PER_USER);
+        assert_eq!(messages.first().map(|entry| entry.id.as_str()), Some("m-3"));
+    }
+
+    #[tokio::test]
+    async fn upsert_fact_prunes_oldest_entries() {
+        let store = InMemoryMemoryStore::default();
+        let base = Utc::now();
+        for idx in 0..(MAX_FACTS_PER_USER + 2) {
+            store
+                .upsert_fact(
+                    "u1",
+                    MemoryFact {
+                        key: format!("key-{idx}"),
+                        value: format!("value-{idx}"),
+                        confidence: 1.0,
+                        source: "test".to_owned(),
+                        updated_at: base + Duration::seconds(idx as i64),
+                    },
+                )
+                .await
+                .expect("fact should upsert");
+        }
+
+        let facts = store
+            .list_facts("u1", usize::MAX)
+            .await
+            .expect("facts should list");
+        assert_eq!(facts.len(), MAX_FACTS_PER_USER);
+        assert!(!facts.iter().any(|entry| entry.key == "key-0"));
+        assert!(!facts.iter().any(|entry| entry.key == "key-1"));
     }
 }
