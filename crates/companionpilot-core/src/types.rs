@@ -2,14 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserIdentity {
-    pub discord_user_id: String,
-    pub guild_id: String,
-    pub aliases: Vec<String>,
-    pub confidence: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageCtx {
     pub message_id: String,
     pub user_id: String,
