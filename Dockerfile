@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 WORKDIR /app
 COPY --from=builder /app/target/release/companionpilot /usr/local/bin/companionpilot
 COPY --from=spogo-builder /go/bin/spogo /usr/local/bin/spogo
+COPY --from=builder /app/skills /app/skills
 
 ENV RUST_LOG=info
 CMD ["companionpilot"]
