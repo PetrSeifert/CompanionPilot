@@ -158,7 +158,7 @@ fn prepare_control_action(args: ControlArgs) -> anyhow::Result<PreparedAction> {
             let position_ms = args
                 .position_ms
                 .context("seek action requires position_ms in milliseconds")?;
-            let seconds = (position_ms / 1000).to_string();
+            let seconds = format_seek_seconds(position_ms);
             vec![with_prefix_owned(
                 &command_prefix,
                 vec!["seek".to_owned(), seconds],
@@ -254,6 +254,16 @@ fn normalize_string_vec(value: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn format_seek_seconds(position_ms: u64) -> String {
+    let seconds = position_ms / 1000;
+    let millis = position_ms % 1000;
+    if millis == 0 {
+        seconds.to_string()
+    } else {
+        format!("{seconds}.{millis:03}")
+    }
+}
+
 fn truncate_for_output(value: &str) -> String {
     let max = 240usize;
     if value.len() <= max {
@@ -316,7 +326,9 @@ fn is_supported_action(action: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{ControlArgs, prepare_control_action, truncate_for_output};
+    use super::{
+        ControlArgs, format_seek_seconds, prepare_control_action, truncate_for_output,
+    };
 
     fn parse_args(value: serde_json::Value) -> ControlArgs {
         serde_json::from_value(value).expect("control args should deserialize")
@@ -355,6 +367,23 @@ mod tests {
             "state": "on"
         }));
         assert!(prepare_control_action(args).is_err());
+    }
+
+    #[test]
+    fn prepare_seek_action_preserves_subsecond_precision() {
+        let args = parse_args(json!({
+            "action": "seek",
+            "position_ms": 12_345
+        }));
+        let prepared = prepare_control_action(args).expect("seek action should prepare");
+        assert_eq!(prepared.command_sequences.len(), 1);
+        assert_eq!(prepared.command_sequences[0][1], "seek");
+        assert_eq!(prepared.command_sequences[0][2], "12.345");
+    }
+
+    #[test]
+    fn format_seek_seconds_omits_fraction_for_whole_seconds() {
+        assert_eq!(format_seek_seconds(15_000), "15");
     }
 
     #[test]
