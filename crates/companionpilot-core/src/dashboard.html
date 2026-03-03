@@ -1384,6 +1384,10 @@ pre.json-block {
                 <input id="settings-openai-tts-voice" type="text" autocomplete="off">
               </label>
               <label class="settings-field settings-field-wide">
+                <span class="settings-label">DISCORD_ALLOWED_CHANNEL_IDS</span>
+                <input id="settings-discord-allowed-channel-ids" type="text" placeholder="channel_id,channel_id">
+              </label>
+              <label class="settings-field settings-field-wide">
                 <span class="settings-label">VOICE_ALLOWLIST</span>
                 <input id="settings-voice-allowlist" type="text" placeholder="guild_id:channel_id,guild_id:channel_id">
               </label>
@@ -1464,6 +1468,7 @@ pre.json-block {
   const settingsOpenAiSttModel = $('#settings-openai-stt-model');
   const settingsOpenAiTtsModel = $('#settings-openai-tts-model');
   const settingsOpenAiTtsVoice = $('#settings-openai-tts-voice');
+  const settingsDiscordAllowedChannelIds = $('#settings-discord-allowed-channel-ids');
   const settingsVoiceAllowlist = $('#settings-voice-allowlist');
   const settingsVoiceIdleTimeoutSec = $('#settings-voice-idle-timeout-sec');
   const settingsVoiceListenWindowMs = $('#settings-voice-listen-window-ms');
@@ -2500,6 +2505,7 @@ pre.json-block {
     settingsOpenAiSttModel.value = settings.openai_stt_model || '';
     settingsOpenAiTtsModel.value = settings.openai_tts_model || '';
     settingsOpenAiTtsVoice.value = settings.openai_tts_voice || '';
+    settingsDiscordAllowedChannelIds.value = settings.discord_allowed_channel_ids || '';
     settingsVoiceAllowlist.value = settings.voice_allowlist || '';
     settingsVoiceIdleTimeoutSec.value = settings.voice_idle_timeout_sec ?? 0;
     settingsVoiceListenWindowMs.value = settings.voice_listen_window_ms ?? 0;
@@ -2524,6 +2530,7 @@ pre.json-block {
         openai_stt_model: settingsOpenAiSttModel.value.trim(),
         openai_tts_model: settingsOpenAiTtsModel.value.trim(),
         openai_tts_voice: settingsOpenAiTtsVoice.value.trim(),
+        discord_allowed_channel_ids: settingsDiscordAllowedChannelIds.value.trim(),
         voice_allowlist: settingsVoiceAllowlist.value.trim(),
         voice_idle_timeout_sec: parseIntegerField(settingsVoiceIdleTimeoutSec, 'VOICE_IDLE_TIMEOUT_SEC'),
         voice_listen_window_ms: parseIntegerField(settingsVoiceListenWindowMs, 'VOICE_LISTEN_WINDOW_MS'),

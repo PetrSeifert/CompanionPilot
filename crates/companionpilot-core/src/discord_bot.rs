@@ -14,14 +14,17 @@ use serenity::{
 use songbird::{SerenityInit, Songbird};
 use tracing::{error, info, warn};
 
-use crate::{orchestrator::DefaultChatOrchestrator, types::MessageCtx, voice::VoiceManager};
+use crate::{
+    orchestrator::DefaultChatOrchestrator, runtime_settings::RuntimeSettingsManager,
+    types::MessageCtx, voice::VoiceManager,
+};
 
 const DISCORD_MESSAGE_MAX_CHARS: usize = 2_000;
 
 struct Handler {
     orchestrator: Arc<DefaultChatOrchestrator>,
     voice: Option<Arc<VoiceManager>>,
-    allowed_channel_ids: HashSet<u64>,
+    runtime_settings: Arc<RuntimeSettingsManager>,
 }
 
 impl Handler {
@@ -74,8 +77,11 @@ impl EventHandler for Handler {
         let bot_user_id = ctx.cache.current_user().id;
         let is_direct_message = msg.guild_id.is_none();
         let mentions_bot = msg.mentions.iter().any(|user| user.id == bot_user_id);
-        let channel_allowed = self.allowed_channel_ids.is_empty()
-            || self.allowed_channel_ids.contains(&msg.channel_id.get());
+        let runtime_settings = self.runtime_settings.get().await;
+        let allowed_channel_ids =
+            parse_allowed_channel_ids(&runtime_settings.discord_allowed_channel_ids);
+        let channel_allowed =
+            allowed_channel_ids.is_empty() || allowed_channel_ids.contains(&msg.channel_id.get());
         if !is_direct_message && !channel_allowed {
             return;
         }
@@ -170,7 +176,7 @@ pub async fn start_discord_bot(
     token: String,
     orchestrator: Arc<DefaultChatOrchestrator>,
     voice: Option<Arc<VoiceManager>>,
-    allowed_channel_ids: HashSet<u64>,
+    runtime_settings: Arc<RuntimeSettingsManager>,
 ) -> anyhow::Result<()> {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::GUILDS
@@ -181,7 +187,7 @@ pub async fn start_discord_bot(
     let handler = Handler {
         orchestrator,
         voice: voice.clone(),
-        allowed_channel_ids,
+        runtime_settings,
     };
 
     let mut builder = Client::builder(token, intents).event_handler(handler);

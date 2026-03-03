@@ -12,6 +12,8 @@ pub struct RuntimeSettings {
     pub openai_stt_model: String,
     pub openai_tts_model: String,
     pub openai_tts_voice: String,
+    #[serde(default)]
+    pub discord_allowed_channel_ids: String,
     pub voice_allowlist: String,
     pub voice_idle_timeout_sec: u64,
     pub voice_listen_window_ms: u64,
@@ -27,6 +29,7 @@ impl RuntimeSettings {
             openai_stt_model: normalize_non_empty("openai_stt_model", &self.openai_stt_model)?,
             openai_tts_model: normalize_non_empty("openai_tts_model", &self.openai_tts_model)?,
             openai_tts_voice: normalize_non_empty("openai_tts_voice", &self.openai_tts_voice)?,
+            discord_allowed_channel_ids: self.discord_allowed_channel_ids.trim().to_owned(),
             voice_allowlist: self.voice_allowlist.trim().to_owned(),
             voice_idle_timeout_sec: self.voice_idle_timeout_sec,
             voice_listen_window_ms: self.voice_listen_window_ms,
@@ -58,6 +61,7 @@ pub struct RuntimeSettingsUpdate {
     pub openai_stt_model: Option<String>,
     pub openai_tts_model: Option<String>,
     pub openai_tts_voice: Option<String>,
+    pub discord_allowed_channel_ids: Option<String>,
     pub voice_allowlist: Option<String>,
     pub voice_idle_timeout_sec: Option<u64>,
     pub voice_listen_window_ms: Option<u64>,
@@ -88,6 +92,10 @@ impl RuntimeSettingsUpdate {
                 .openai_tts_voice
                 .clone()
                 .unwrap_or_else(|| existing.openai_tts_voice.clone()),
+            discord_allowed_channel_ids: self
+                .discord_allowed_channel_ids
+                .clone()
+                .unwrap_or_else(|| existing.discord_allowed_channel_ids.clone()),
             voice_allowlist: self
                 .voice_allowlist
                 .clone()
@@ -278,6 +286,7 @@ mod tests {
             openai_stt_model: "gpt-4o-mini-transcribe".to_owned(),
             openai_tts_model: "gpt-4o-mini-tts".to_owned(),
             openai_tts_voice: "alloy".to_owned(),
+            discord_allowed_channel_ids: "123,456".to_owned(),
             voice_allowlist: "1:2".to_owned(),
             voice_idle_timeout_sec: 300,
             voice_listen_window_ms: 12_000,
