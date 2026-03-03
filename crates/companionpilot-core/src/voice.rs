@@ -843,12 +843,14 @@ fn elapsed_ms(started_at: Instant) -> u64 {
 fn pcm_i16_to_wav_bytes(samples: &[i16], channels: u16, sample_rate: u32) -> Vec<u8> {
     let bits_per_sample = 16u16;
     let bytes_per_sample = (bits_per_sample / 8) as u32;
-    let data_size = (samples.len() as u32) * bytes_per_sample;
+    let max_sample_count = (u32::MAX / bytes_per_sample) as usize;
+    let sample_count = samples.len().min(max_sample_count);
+    let data_size = (sample_count as u32) * bytes_per_sample;
     let byte_rate = sample_rate * channels as u32 * bytes_per_sample;
     let block_align = channels * (bits_per_sample / 8);
     let chunk_size = 36 + data_size;
 
-    let mut wav = Vec::with_capacity((44 + data_size) as usize);
+    let mut wav = Vec::with_capacity(44 + sample_count * bytes_per_sample as usize);
     wav.extend_from_slice(b"RIFF");
     wav.extend_from_slice(&chunk_size.to_le_bytes());
     wav.extend_from_slice(b"WAVE");
@@ -863,7 +865,7 @@ fn pcm_i16_to_wav_bytes(samples: &[i16], channels: u16, sample_rate: u32) -> Vec
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_size.to_le_bytes());
 
-    for sample in samples {
+    for sample in samples.iter().take(sample_count) {
         wav.extend_from_slice(&sample.to_le_bytes());
     }
 
