@@ -4,8 +4,8 @@ mod postgres;
 use async_trait::async_trait;
 
 use crate::types::{
-    ChatMessageRecord, MemoryContext, MemoryFact, MessageLatencyRecord, PlannerDecisionRecord,
-    ToolCallRecord, UserDashboardSummary,
+    ChatMessageRecord, MemoryContext, MemoryFact, MessageLatencyRecord,
+    OrchestrationDecisionRecord, ToolCallRecord, UserDashboardSummary,
 };
 
 pub use in_memory::InMemoryMemoryStore;
@@ -49,7 +49,7 @@ pub trait MemoryStore: Send + Sync {
 
     async fn clear_facts(&self, user_id: &str) -> anyhow::Result<u64>;
 
-    async fn clear_planner_decisions(&self, user_id: &str) -> anyhow::Result<u64>;
+    async fn clear_orchestration_decisions(&self, user_id: &str) -> anyhow::Result<u64>;
 
     async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>>;
 
@@ -61,13 +61,16 @@ pub trait MemoryStore: Send + Sync {
         limit: usize,
     ) -> anyhow::Result<Vec<ToolCallRecord>>;
 
-    async fn record_planner_decision(&self, decision: PlannerDecisionRecord) -> anyhow::Result<()>;
+    async fn record_orchestration_decision(
+        &self,
+        decision: OrchestrationDecisionRecord,
+    ) -> anyhow::Result<()>;
 
-    async fn list_planner_decisions(
+    async fn list_orchestration_decisions(
         &self,
         user_id: &str,
         limit: usize,
-    ) -> anyhow::Result<Vec<PlannerDecisionRecord>>;
+    ) -> anyhow::Result<Vec<OrchestrationDecisionRecord>>;
 
     async fn record_message_latency(&self, latency: MessageLatencyRecord) -> anyhow::Result<()>;
 

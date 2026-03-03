@@ -2,11 +2,11 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::types::{MessageCtx, MessageLatencyRecord, PlannerDecisionRecord, ToolCallRecord};
+use crate::types::{MessageCtx, MessageLatencyRecord, OrchestrationDecisionRecord, ToolCallRecord};
 
 use super::{
     DefaultChatOrchestrator,
-    contracts::{SkillSelectionDecision, ToolFollowupDecision, UnifiedPlanDecision},
+    contracts::{NativeTurnDecision, SkillSelectionDecision},
 };
 
 pub(super) fn truncate_for_log(input: &str, max_len: usize) -> String {
@@ -33,38 +33,6 @@ impl DefaultChatOrchestrator {
         if let Err(error) = self.memory.record_tool_call(call).await {
             warn!(?error, "failed to persist tool call log");
         }
-    }
-
-    pub(super) async fn record_unified_planner_decision(
-        &self,
-        ctx: &MessageCtx,
-        decision: &UnifiedPlanDecision,
-        duration_ms: u64,
-    ) {
-        let (decision_value, rationale, payload, success, error) = match decision {
-            UnifiedPlanDecision::UsePlan {
-                rationale, payload, ..
-            } => ("apply_plan", rationale.clone(), payload.clone(), true, None),
-            UnifiedPlanDecision::Fallback { reason, error } => (
-                "fallback_no_tools",
-                (*reason).to_owned(),
-                json!({}),
-                false,
-                error.clone(),
-            ),
-        };
-
-        self.record_planner_decision(
-            ctx,
-            "unified",
-            decision_value,
-            rationale,
-            payload,
-            success,
-            error,
-            duration_ms,
-        )
-        .await;
     }
 
     pub(super) async fn record_skill_selector_decision(
@@ -96,7 +64,7 @@ impl DefaultChatOrchestrator {
             ),
         };
 
-        self.record_planner_decision(
+        self.record_orchestration_decision(
             ctx,
             "skill_selector",
             decision_value,
@@ -109,50 +77,57 @@ impl DefaultChatOrchestrator {
         .await;
     }
 
-    pub(super) async fn record_tool_followup_decision(
+    pub(super) async fn record_native_turn_decision(
         &self,
         ctx: &MessageCtx,
         round: usize,
-        decision: &ToolFollowupDecision,
+        decision: &NativeTurnDecision,
         duration_ms: u64,
     ) {
         let (decision_value, rationale, payload, success, error) = match decision {
-            ToolFollowupDecision::Final {
-                rationale, payload, ..
-            } => (
-                "final_answer",
-                rationale.clone(),
-                payload.clone(),
-                true,
-                None,
-            ),
-            ToolFollowupDecision::UseTools {
-                rationale, payload, ..
+            NativeTurnDecision::ToolRequest {
+                tool_count,
+                payload,
             } => (
                 "request_tools",
-                rationale.clone(),
-                payload.clone(),
+                format!("round_{round}_tool_request"),
+                json!({
+                    "round": round,
+                    "tool_count": tool_count,
+                    "decision": payload
+                }),
                 true,
                 None,
             ),
-            ToolFollowupDecision::Fallback { reason, error } => (
-                "fallback_no_tools",
-                (*reason).to_owned(),
-                json!({}),
+            NativeTurnDecision::FinalAnswer {
+                response_text,
+                payload,
+            } => (
+                "final_answer",
+                format!("round_{round}_final"),
+                json!({
+                    "round": round,
+                    "response_preview": truncate_for_log(response_text, 180),
+                    "decision": payload
+                }),
+                true,
+                None,
+            ),
+            NativeTurnDecision::Fallback { reason, error } => (
+                "fallback",
+                format!("round_{round}_{reason}"),
+                json!({ "round": round }),
                 false,
                 error.clone(),
             ),
         };
 
-        self.record_planner_decision(
+        self.record_orchestration_decision(
             ctx,
-            "tool_followup",
+            "native_turn",
             decision_value,
             rationale,
-            json!({
-                "round": round,
-                "decision": payload
-            }),
+            payload,
             success,
             error,
             duration_ms,
@@ -160,10 +135,10 @@ impl DefaultChatOrchestrator {
         .await;
     }
 
-    async fn record_planner_decision(
+    async fn record_orchestration_decision(
         &self,
         ctx: &MessageCtx,
-        planner: &str,
+        stage: &str,
         decision: &str,
         rationale: String,
         payload: Value,
@@ -171,12 +146,12 @@ impl DefaultChatOrchestrator {
         error: Option<String>,
         duration_ms: u64,
     ) {
-        let record = PlannerDecisionRecord {
+        let record = OrchestrationDecisionRecord {
             user_id: ctx.user_id.clone(),
             guild_id: ctx.guild_id.clone(),
             channel_id: ctx.channel_id.clone(),
             message_id: ctx.message_id.clone(),
-            planner: planner.to_owned(),
+            stage: stage.to_owned(),
             decision: decision.to_owned(),
             rationale,
             payload_json: payload.to_string(),
@@ -186,10 +161,10 @@ impl DefaultChatOrchestrator {
             timestamp: Utc::now(),
         };
 
-        if let Err(store_error) = self.memory.record_planner_decision(record).await {
+        if let Err(store_error) = self.memory.record_orchestration_decision(record).await {
             warn!(
                 ?store_error,
-                planner, "failed to persist planner decision log"
+                stage, "failed to persist orchestration decision log"
             );
         }
     }

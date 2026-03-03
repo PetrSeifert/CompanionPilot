@@ -4,7 +4,10 @@ use async_trait::async_trait;
 
 use crate::runtime_settings::RuntimeSettingsManager;
 
-use super::{MockModelProvider, ModelProvider, ModelRequest, OpenRouterProvider};
+use super::{
+    MockModelProvider, ModelProvider, ModelRequest, ModelTurnRequest, ModelTurnResponse,
+    OpenRouterProvider,
+};
 
 pub struct RuntimeModelProvider {
     runtime_settings: Arc<RuntimeSettingsManager>,
@@ -59,6 +62,31 @@ impl ModelProvider for RuntimeModelProvider {
                 }
             }
             _ => self.mock.complete(request).await,
+        }
+    }
+
+    async fn complete_turn(&self, request: ModelTurnRequest) -> anyhow::Result<ModelTurnResponse> {
+        let settings = self.runtime_settings.get().await;
+        match settings.model_provider.as_str() {
+            "mock" => self.mock.complete_turn(request).await,
+            "openrouter" => {
+                let Some(openrouter) = &self.openrouter else {
+                    return self.mock.complete_turn(request).await;
+                };
+                openrouter
+                    .complete_turn_with_model(&settings.openrouter_model, request)
+                    .await
+            }
+            "auto" => {
+                if let Some(openrouter) = &self.openrouter {
+                    openrouter
+                        .complete_turn_with_model(&settings.openrouter_model, request)
+                        .await
+                } else {
+                    self.mock.complete_turn(request).await
+                }
+            }
+            _ => self.mock.complete_turn(request).await,
         }
     }
 }

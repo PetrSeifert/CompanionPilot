@@ -3,7 +3,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::types::{
     ChatMessageRecord, ChatRole, MemoryContext, MemoryFact, MessageLatencyRecord,
-    PlannerDecisionRecord, ToolCallRecord, UserDashboardSummary,
+    OrchestrationDecisionRecord, ToolCallRecord, UserDashboardSummary,
 };
 
 use super::MemoryStore;
@@ -289,8 +289,8 @@ impl MemoryStore for PostgresMemoryStore {
         Ok(result.rows_affected())
     }
 
-    async fn clear_planner_decisions(&self, user_id: &str) -> anyhow::Result<u64> {
-        let result = sqlx::query("DELETE FROM planner_decision_logs WHERE user_id = $1")
+    async fn clear_orchestration_decisions(&self, user_id: &str) -> anyhow::Result<u64> {
+        let result = sqlx::query("DELETE FROM orchestration_decision_logs WHERE user_id = $1")
             .bind(user_id)
             .execute(&self.pool)
             .await?;
@@ -446,17 +446,20 @@ impl MemoryStore for PostgresMemoryStore {
         Ok(calls)
     }
 
-    async fn record_planner_decision(&self, decision: PlannerDecisionRecord) -> anyhow::Result<()> {
+    async fn record_orchestration_decision(
+        &self,
+        decision: OrchestrationDecisionRecord,
+    ) -> anyhow::Result<()> {
         sqlx::query(
-            "INSERT INTO planner_decision_logs
-             (user_id, guild_id, channel_id, message_id, planner, decision, rationale, payload_json, success, error, duration_ms, timestamp)
+            "INSERT INTO orchestration_decision_logs
+             (user_id, guild_id, channel_id, message_id, stage, decision, rationale, payload_json, success, error, duration_ms, timestamp)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(decision.user_id)
         .bind(decision.guild_id)
         .bind(decision.channel_id)
         .bind(decision.message_id)
-        .bind(decision.planner)
+        .bind(decision.stage)
         .bind(decision.decision)
         .bind(decision.rationale)
         .bind(decision.payload_json)
@@ -470,11 +473,11 @@ impl MemoryStore for PostgresMemoryStore {
         Ok(())
     }
 
-    async fn list_planner_decisions(
+    async fn list_orchestration_decisions(
         &self,
         user_id: &str,
         limit: usize,
-    ) -> anyhow::Result<Vec<PlannerDecisionRecord>> {
+    ) -> anyhow::Result<Vec<OrchestrationDecisionRecord>> {
         let limit = limit as i64;
         let mut decisions = sqlx::query_as::<
             _,
@@ -493,8 +496,8 @@ impl MemoryStore for PostgresMemoryStore {
                 chrono::DateTime<chrono::Utc>,
             ),
         >(
-            "SELECT user_id, guild_id, channel_id, message_id, planner, decision, rationale, payload_json, success, error, duration_ms, timestamp
-             FROM planner_decision_logs
+            "SELECT user_id, guild_id, channel_id, message_id, stage, decision, rationale, payload_json, success, error, duration_ms, timestamp
+             FROM orchestration_decision_logs
              WHERE user_id = $1
              ORDER BY timestamp DESC
              LIMIT $2",
@@ -510,7 +513,7 @@ impl MemoryStore for PostgresMemoryStore {
                 guild_id,
                 channel_id,
                 message_id,
-                planner,
+                stage,
                 decision,
                 rationale,
                 payload_json,
@@ -518,12 +521,12 @@ impl MemoryStore for PostgresMemoryStore {
                 error,
                 duration_ms,
                 timestamp,
-            )| PlannerDecisionRecord {
+            )| OrchestrationDecisionRecord {
                 user_id,
                 guild_id,
                 channel_id,
                 message_id,
-                planner,
+                stage,
                 decision,
                 rationale,
                 payload_json,

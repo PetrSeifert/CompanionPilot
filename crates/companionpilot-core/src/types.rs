@@ -45,10 +45,9 @@ pub struct ReplyTimings {
     pub total_ms: u64,
     pub load_context_ms: u64,
     pub record_user_message_ms: u64,
-    pub planner_ms: u64,
+    pub decision_ms: u64,
     pub tool_execution_ms: u64,
     pub final_model_ms: u64,
-    pub memory_write_ms: u64,
     pub record_assistant_message_ms: u64,
     pub tool_calls: Vec<ToolCallTiming>,
 }
@@ -117,12 +116,12 @@ pub struct ToolCallRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlannerDecisionRecord {
+pub struct OrchestrationDecisionRecord {
     pub user_id: String,
     pub guild_id: String,
     pub channel_id: String,
     pub message_id: String,
-    pub planner: String,
+    pub stage: String,
     pub decision: String,
     pub rationale: String,
     pub payload_json: String,

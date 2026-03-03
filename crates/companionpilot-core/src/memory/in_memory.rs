@@ -11,8 +11,8 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 
 use crate::types::{
-    ChatMessageRecord, MemoryContext, MemoryFact, MessageLatencyRecord, PlannerDecisionRecord,
-    ToolCallRecord, UserDashboardSummary,
+    ChatMessageRecord, MemoryContext, MemoryFact, MessageLatencyRecord,
+    OrchestrationDecisionRecord, ToolCallRecord, UserDashboardSummary,
 };
 
 use super::MemoryStore;
@@ -20,7 +20,7 @@ use super::MemoryStore;
 const MAX_FACTS_PER_USER: usize = 512;
 const MAX_CHAT_MESSAGES_PER_USER: usize = 2_048;
 const MAX_TOOL_CALLS_PER_USER: usize = 1_024;
-const MAX_PLANNER_DECISIONS_PER_USER: usize = 1_024;
+const MAX_ORCHESTRATION_DECISIONS_PER_USER: usize = 1_024;
 const MAX_MESSAGE_LATENCIES_PER_USER: usize = 2_048;
 
 #[derive(Debug)]
@@ -29,7 +29,7 @@ pub struct InMemoryMemoryStore {
     summaries: Arc<RwLock<HashMap<String, String>>>,
     chats: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
     tool_calls: Arc<RwLock<HashMap<String, Vec<ToolCallRecord>>>>,
-    planner_decisions: Arc<RwLock<HashMap<String, Vec<PlannerDecisionRecord>>>>,
+    orchestration_decisions: Arc<RwLock<HashMap<String, Vec<OrchestrationDecisionRecord>>>>,
     message_latencies: Arc<RwLock<HashMap<String, Vec<MessageLatencyRecord>>>>,
     chat_seq: AtomicU64,
 }
@@ -41,7 +41,7 @@ impl Default for InMemoryMemoryStore {
             summaries: Arc::new(RwLock::new(HashMap::new())),
             chats: Arc::new(RwLock::new(HashMap::new())),
             tool_calls: Arc::new(RwLock::new(HashMap::new())),
-            planner_decisions: Arc::new(RwLock::new(HashMap::new())),
+            orchestration_decisions: Arc::new(RwLock::new(HashMap::new())),
             message_latencies: Arc::new(RwLock::new(HashMap::new())),
             chat_seq: AtomicU64::new(1),
         }
@@ -218,8 +218,8 @@ impl MemoryStore for InMemoryMemoryStore {
         Ok(removed)
     }
 
-    async fn clear_planner_decisions(&self, user_id: &str) -> anyhow::Result<u64> {
-        let mut decisions = self.planner_decisions.write().await;
+    async fn clear_orchestration_decisions(&self, user_id: &str) -> anyhow::Result<u64> {
+        let mut decisions = self.orchestration_decisions.write().await;
         let removed = decisions
             .remove(user_id)
             .map(|list| list.len() as u64)
@@ -301,24 +301,27 @@ impl MemoryStore for InMemoryMemoryStore {
         Ok(calls)
     }
 
-    async fn record_planner_decision(&self, decision: PlannerDecisionRecord) -> anyhow::Result<()> {
+    async fn record_orchestration_decision(
+        &self,
+        decision: OrchestrationDecisionRecord,
+    ) -> anyhow::Result<()> {
         let user_id = decision.user_id.clone();
-        let mut decisions = self.planner_decisions.write().await;
+        let mut decisions = self.orchestration_decisions.write().await;
         let entries = decisions.entry(user_id).or_default();
         entries.push(decision);
-        prune_oldest_by(entries, MAX_PLANNER_DECISIONS_PER_USER, |entry| {
+        prune_oldest_by(entries, MAX_ORCHESTRATION_DECISIONS_PER_USER, |entry| {
             entry.timestamp
         });
         Ok(())
     }
 
-    async fn list_planner_decisions(
+    async fn list_orchestration_decisions(
         &self,
         user_id: &str,
         limit: usize,
-    ) -> anyhow::Result<Vec<PlannerDecisionRecord>> {
+    ) -> anyhow::Result<Vec<OrchestrationDecisionRecord>> {
         let mut decisions = self
-            .planner_decisions
+            .orchestration_decisions
             .read()
             .await
             .get(user_id)

@@ -17,7 +17,7 @@ Workspace layout:
 - Built-in `current_datetime` tool for UTC date/time grounding
 - Built-in `cli` tool for Spotify command execution with `spogo`-only enforcement
 - HTTP API for health and chat (`axum`)
-- Reply timing telemetry (planner/tools/model/memory stage durations)
+- Reply timing telemetry (decision/tools/model/persistence stage durations)
 - Local dev infra (`docker-compose` with Postgres + Redis)
 - Railway deployment entry (`railway.json`)
 
@@ -43,6 +43,7 @@ psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/00
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0003_tool_call_logs.sql
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0004_planner_decision_logs.sql
 psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0005_message_latency_logs.sql
+psql postgres://postgres:postgres@localhost:5432/companionpilot -f migrations/0006_orchestration_decision_logs.sql
 ```
 
 4. Run the service:
@@ -75,14 +76,14 @@ curl -X POST http://localhost:8080/chat \
 
 - Set `DISCORD_TOKEN` in `.env`.
 - DM the bot, mention it in guild channels, or configure `DISCORD_ALLOWED_CHANNEL_IDS` to let it respond in specific guild channels without mentions.
-- CompanionPilot decides tool usage automatically from a unified planner decision.
-- CompanionPilot now runs a skill selector before tool planning.
+- CompanionPilot decides tool usage through native model tool-calling.
+- CompanionPilot runs a skill selector before the native tool loop.
 - Skills are loaded at startup from repo-root `skills/` markdown files.
-- Selected skills guide planning and final synthesis, but do not force or block tool execution.
-- For time-sensitive requests, planner can call `current_datetime` before `web_search`.
-- For Spotify operations, planner uses `cli` with `command` (for example `spogo status` or `spogo search track muse`).
+- Selected skills guide tool usage and final synthesis, but do not force or block tool execution.
+- For time-sensitive requests, the model can call `current_datetime` before `web_search`.
+- For Spotify operations, the model uses `cli` with `command` (for example `spogo status` or `spogo search track muse`).
 - `cli` blocks any non-`spogo` command and returns a clear "not allowed" error.
-- Web search is used when the planner determines external facts are required.
+- Web search is used when external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 - Short-term memory is injected from recent channel turns, even when no long-term fact is stored.
 - Voice mode is optional and tool-call driven: configure `VOICE_ENABLED=true`, `VOICE_ALLOWLIST`, and `OPENAI_API_KEY` to allow AI-planned `discord_voice_join` and `discord_voice_leave`.
@@ -119,7 +120,7 @@ Keep answers short unless the task requires depth.
 ```
 
 - The skill selector sees only metadata (`id`, `title`, `description`, `tags`) when choosing skills.
-- Selected skills can provide markdown guidance to planner/synthesis prompts.
+- Selected skills can provide markdown guidance to native tool-loop/synthesis prompts.
 - Changing files in `skills/` requires a process restart.
 
 ## Model provider selection
@@ -141,7 +142,7 @@ OpenRouter settings:
 
 - If `OPENROUTER_API_KEY` is missing (or provider is `mock`), the app uses the mock model provider.
 - If `DATABASE_URL` is missing, memory uses in-process storage.
-- If `TAVILY_API_KEY` is missing, planner-selected `web_search` calls return a configuration error.
+- If `TAVILY_API_KEY` is missing, model-selected `web_search` calls return a configuration error.
 - Spotify tool calls use local `spogo` CLI execution with fail-fast error propagation.
 - `API_AUTH_TOKEN` protects `/chat`, `/dashboard`, and dashboard `/api/*` endpoints.
 - Auth supports:
@@ -158,10 +159,10 @@ RUST_LOG=companionpilot=debug,companionpilot_core=debug,info
 
 Then look for:
 
-- `tool call selected by unified planner` (tool + args selected)
+- `tool call selected by native orchestration` (tool + args selected)
 - `tool call completed` (tool finished)
 - `tavily web search start` / `tavily web search success` (actual Tavily call path)
 - `spogo command start` / `spogo command failed` (CLI invocation path)
-- `planner fallback: running without tools and without memory write` (planner failure fallback)
+- `native tool decision call failed; stopping tool loop` (model decision fallback)
 - `reply completed` (per-message timing summary)
 - `slow reply detected` / `slow Discord reply detected` (slow-path warnings, threshold 30s)

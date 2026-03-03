@@ -2142,7 +2142,7 @@ pre.json-block {
             icon.textContent = 'PLAN';
 
             const label = document.createElement('span');
-            label.textContent = dec.planner + ' \u2192 ' + dec.decision + formatDurationSuffix(dec.duration_ms);
+            label.textContent = dec.stage + ' \u2192 ' + dec.decision + formatDurationSuffix(dec.duration_ms);
 
             item.appendChild(icon);
             item.appendChild(label);
@@ -2402,7 +2402,7 @@ pre.json-block {
       const name = document.createElement('span');
       name.className = 'exp-card-name';
 
-      const plannerText = document.createTextNode(dec.planner || '');
+      const plannerText = document.createTextNode(dec.stage || '');
       const arrow = document.createElement('span');
       arrow.style.color = 'var(--text-faint)';
       arrow.style.margin = '0 6px';
@@ -2688,7 +2688,7 @@ pre.json-block {
     const phases = [
       'PROCESSING TRANSMISSION...',
       'LOADING CONTEXT & MEMORY...',
-      'RUNNING PLANNER ANALYSIS...',
+      'RUNNING DECISION ANALYSIS...',
       'EVALUATING TOOL CALLS...',
       'GENERATING RESPONSE...',
     ];

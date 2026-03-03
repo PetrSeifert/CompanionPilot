@@ -2,11 +2,12 @@ use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use tracing::{debug, info, warn};
+use serde_json::json;
+use tracing::{info, warn};
 
 use crate::{
     memory::MemoryStore,
-    model::{ModelProvider, ModelRequest},
+    model::{ModelMessage, ModelMessageRole, ModelProvider, ModelRequest, ModelTurnRequest},
     safety::SafetyPolicy,
     skills::SkillCatalog,
     tools::ToolExecutor,
@@ -24,31 +25,21 @@ mod prompts;
 mod sanitize;
 mod telemetry;
 mod tool_exec;
+mod tool_schema;
 mod util;
 
 #[cfg(test)]
 mod tests;
 
-use contracts::{
-    MemoryDecision, SkillSelectionDecision, ToolFollowupDecision, UnifiedPlanDecision,
-};
-use prompts::{build_support_context_block, build_system_prompt};
-use tool_exec::{dedupe_citations, fallback_tool_output_text, format_tool_outputs};
+use contracts::{NativeTurnDecision, SkillSelectionDecision};
+use prompts::build_native_agent_system_prompt;
+use sanitize::sanitize_native_tool_calls;
+use tool_exec::{dedupe_citations, fallback_tool_output_text};
+use tool_schema::build_native_tool_definitions;
 use util::elapsed_ms;
 
-#[cfg(test)]
-use contracts::PlannedToolCall;
-#[cfg(test)]
-use parse::parse_unified_plan;
-#[cfg(test)]
-use sanitize::{
-    clean_memory_value, enforce_datetime_planning_boundary, sanitize_memory_key,
-    sanitize_planned_tool_calls,
-};
-#[cfg(test)]
-use telemetry::truncate_for_log;
-
 pub const SLOW_REPLY_THRESHOLD_MS: u64 = 30_000;
+const MAX_NATIVE_TOOL_ROUNDS: usize = 6;
 
 pub struct DefaultChatOrchestrator {
     model: Arc<dyn ModelProvider>,
@@ -61,6 +52,7 @@ pub struct DefaultChatOrchestrator {
 pub fn default_system_prompt_base() -> &'static str {
     prompts::default_system_prompt_base()
 }
+
 impl DefaultChatOrchestrator {
     pub fn new(
         model: Arc<dyn ModelProvider>,
@@ -131,164 +123,168 @@ impl DefaultChatOrchestrator {
         };
         let selected_skills = self.skills.select_by_ids(&selected_skill_ids);
 
-        let planner_started_at = Instant::now();
-        let planner_decision = self
-            .decide_unified_plan(&ctx.content, &memory_context, &selected_skills)
-            .await;
-        let unified_planner_ms = elapsed_ms(planner_started_at);
-        let mut planner_ms = skill_selector_ms.saturating_add(unified_planner_ms);
-        self.record_unified_planner_decision(&ctx, &planner_decision, unified_planner_ms)
-            .await;
-
-        let (mut pending_tool_calls, memory_decision) = match planner_decision {
-            UnifiedPlanDecision::UsePlan {
-                tool_calls, memory, ..
-            } => (tool_calls, memory),
-            UnifiedPlanDecision::Fallback { reason, .. } => {
-                debug!(
-                    user_id = %ctx.user_id,
-                    reason,
-                    "planner fallback: running without tools and without memory write"
-                );
-                (
-                    Vec::new(),
-                    MemoryDecision::Skip {
-                        reason: "planner_fallback",
-                    },
-                )
-            }
-        };
-
+        let mut decision_ms = skill_selector_ms;
         let mut executed_tool_calls = Vec::new();
         let mut tool_outputs = Vec::new();
         let mut citations = Vec::new();
         let mut tool_timings = Vec::new();
-        let mut followup_reply_text: Option<String> = None;
-        let mut tool_round = 0usize;
 
-        loop {
-            if pending_tool_calls.is_empty() {
-                break;
-            }
+        let native_system_prompt = build_native_agent_system_prompt(
+            &memory_context,
+            system_prompt_override.as_deref(),
+            &selected_skills,
+        );
+        let tool_definitions = build_native_tool_definitions();
+        let mut conversation_messages = vec![ModelMessage {
+            role: ModelMessageRole::User,
+            content: ctx.content.clone(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }];
 
-            tool_round += 1;
-            let planner_source = if tool_round == 1 {
-                "unified_planner"
-            } else {
-                "tool_followup"
-            };
-            self.execute_planned_tool_calls(
-                &ctx,
-                pending_tool_calls,
-                planner_source,
-                &mut executed_tool_calls,
-                &mut tool_outputs,
-                &mut citations,
-                &mut tool_timings,
-            )
-            .await;
+        let mut native_reply_text: Option<String> = None;
 
-            let followup_started_at = Instant::now();
-            let followup_decision = self
-                .decide_tool_followup(
-                    &ctx.content,
-                    &memory_context,
-                    &selected_skills,
-                    &tool_outputs,
-                )
+        for round in 1..=MAX_NATIVE_TOOL_ROUNDS {
+            let decision_started_at = Instant::now();
+            let turn_result = self
+                .model
+                .complete_turn(ModelTurnRequest {
+                    system_prompt: native_system_prompt.clone(),
+                    messages: conversation_messages.clone(),
+                    tools: tool_definitions.clone(),
+                })
                 .await;
-            let followup_ms = elapsed_ms(followup_started_at);
-            planner_ms = planner_ms.saturating_add(followup_ms);
-            self.record_tool_followup_decision(&ctx, tool_round, &followup_decision, followup_ms)
-                .await;
+            let round_decision_ms = elapsed_ms(decision_started_at);
+            decision_ms = decision_ms.saturating_add(round_decision_ms);
 
-            match followup_decision {
-                ToolFollowupDecision::Final { answer, .. } => {
-                    followup_reply_text = Some(answer);
-                    break;
-                }
-                ToolFollowupDecision::UseTools { tool_calls, .. } => {
-                    pending_tool_calls = tool_calls;
-                }
-                ToolFollowupDecision::Fallback { reason, .. } => {
-                    debug!(
-                        user_id = %ctx.user_id,
-                        reason,
-                        tool_round,
-                        "tool follow-up planner fallback; forcing final synthesis"
+            let turn_result = match turn_result {
+                Ok(result) => result,
+                Err(error) => {
+                    self.record_native_turn_decision(
+                        &ctx,
+                        round,
+                        &NativeTurnDecision::Fallback {
+                            reason: "model_error",
+                            error: Some(error.to_string()),
+                        },
+                        round_decision_ms,
+                    )
+                    .await;
+                    warn!(
+                        ?error,
+                        round, "native tool decision call failed; stopping tool loop"
                     );
                     break;
                 }
+            };
+
+            let assistant_text = turn_result.assistant_text.trim().to_owned();
+            let raw_tool_calls = turn_result.tool_calls.clone();
+            let planned_tool_calls = sanitize_native_tool_calls(turn_result.tool_calls);
+            conversation_messages.push(ModelMessage {
+                role: ModelMessageRole::Assistant,
+                content: assistant_text.clone(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: raw_tool_calls,
+            });
+
+            if planned_tool_calls.is_empty() {
+                self.record_native_turn_decision(
+                    &ctx,
+                    round,
+                    &NativeTurnDecision::FinalAnswer {
+                        response_text: assistant_text.clone(),
+                        payload: json!({
+                            "assistant_text": assistant_text,
+                            "tool_calls": []
+                        }),
+                    },
+                    round_decision_ms,
+                )
+                .await;
+
+                if !assistant_text.is_empty() {
+                    native_reply_text = Some(assistant_text);
+                }
+                break;
             }
+
+            self.record_native_turn_decision(
+                &ctx,
+                round,
+                &NativeTurnDecision::ToolRequest {
+                    tool_count: planned_tool_calls.len(),
+                    payload: json!({
+                        "assistant_text_preview": assistant_text,
+                        "tool_calls": planned_tool_calls
+                            .iter()
+                            .map(|call| json!({
+                                "id": call.call_id,
+                                "tool_name": call.call.tool_name,
+                                "args": call.call.args,
+                            }))
+                            .collect::<Vec<_>>()
+                    }),
+                },
+                round_decision_ms,
+            )
+            .await;
+
+            let source = format!("native_round_{round}");
+            let tool_messages = self
+                .execute_native_tool_round(
+                    &ctx,
+                    planned_tool_calls,
+                    &source,
+                    &mut executed_tool_calls,
+                    &mut tool_outputs,
+                    &mut citations,
+                    &mut tool_timings,
+                )
+                .await;
+            conversation_messages.extend(tool_messages);
         }
 
         let tool_execution_ms = tool_timings.iter().fold(0u64, |total, timing| {
             total.saturating_add(timing.duration_ms)
         });
 
-        let (reply_text, final_model_ms) = if let Some(answer) = followup_reply_text {
+        let (reply_text, final_model_ms) = if let Some(answer) = native_reply_text {
             (answer, 0)
-        } else {
+        } else if !tool_outputs.is_empty() {
             let final_model_started_at = Instant::now();
-            let reply_text = if tool_outputs.is_empty() {
-                self.model
-                    .complete(ModelRequest {
-                        system_prompt: build_system_prompt(
-                            &memory_context,
-                            system_prompt_override.as_deref(),
-                            &selected_skills,
-                        ),
-                        user_prompt: ctx.content.clone(),
-                    })
-                    .await?
-            } else {
-                let tool_output_block = format_tool_outputs(&tool_outputs);
-                let custom_prompt_header = system_prompt_override
-                    .as_deref()
-                    .map(|prompt| format!("Custom system prompt override:\n{prompt}\n\n"))
-                    .unwrap_or_default();
-                self.model
-                    .complete(ModelRequest {
-                        system_prompt: format!(
-                            "{}You are CompanionPilot. Use the provided tool outputs to answer the user's request precisely.\nNever say you cannot browse the web in this mode.\nNever output XML/JSON/pseudo tool-call markup.\nReturn only the final user-facing answer.\nIf citations are provided, keep your answer concise and factual.\n{}",
-                            custom_prompt_header,
-                            build_support_context_block(&memory_context, &selected_skills)
-                        ),
-                        user_prompt: format!(
-                            "User request:\n{}\n\nTool outputs:\n{}",
-                            ctx.content, tool_output_block
-                        ),
-                    })
-                    .await
-                    .unwrap_or_else(|error| {
-                        warn!(?error, "failed to synthesize final answer from tool outputs");
-                        fallback_tool_output_text(&tool_outputs)
-                    })
-            };
-            (reply_text, elapsed_ms(final_model_started_at))
+            let fallback_synthesis_prompt = format!(
+                "{}\n\nFallback synthesis mode: produce the best final answer from available tool outputs. Do not request tools in this step.",
+                native_system_prompt
+            );
+            let synthesized = self
+                .model
+                .complete(ModelRequest {
+                    system_prompt: fallback_synthesis_prompt,
+                    user_prompt: format!(
+                        "User request:\n{}\n\nTool outputs:\n{}",
+                        ctx.content,
+                        tool_exec::format_tool_outputs(&tool_outputs)
+                    ),
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    warn!(
+                        ?error,
+                        "native tool loop did not produce final answer; using tool fallback output"
+                    );
+                    fallback_tool_output_text(&tool_outputs)
+                });
+            (synthesized, elapsed_ms(final_model_started_at))
+        } else {
+            (
+                "I could not complete this request due to an internal orchestration error."
+                    .to_owned(),
+                0,
+            )
         };
-
-        let memory_write_started_at = Instant::now();
-        match memory_decision {
-            MemoryDecision::Store { fact, rationale } => {
-                info!(
-                    user_id = %ctx.user_id,
-                    memory_key = %fact.key,
-                    confidence = fact.confidence,
-                    rationale,
-                    "memory fact stored"
-                );
-                self.memory.upsert_fact(&ctx.user_id, fact).await?;
-            }
-            MemoryDecision::Skip { reason } => {
-                debug!(
-                    user_id = %ctx.user_id,
-                    reason,
-                    "memory write skipped"
-                );
-            }
-        }
-        let memory_write_ms = elapsed_ms(memory_write_started_at);
 
         let record_assistant_message_started_at = Instant::now();
         self.memory
@@ -308,10 +304,9 @@ impl DefaultChatOrchestrator {
             total_ms: elapsed_ms(request_started_at),
             load_context_ms,
             record_user_message_ms,
-            planner_ms,
+            decision_ms,
             tool_execution_ms,
             final_model_ms,
-            memory_write_ms,
             record_assistant_message_ms,
             tool_calls: tool_timings,
         };
@@ -323,7 +318,7 @@ impl DefaultChatOrchestrator {
             stt_ms: None,
             tts_ms: None,
             final_response_ms: timings.total_ms,
-            decision_ms: timings.planner_ms,
+            decision_ms: timings.decision_ms,
             tool_call_ms: timings.tool_execution_ms,
             timestamp: Utc::now(),
         })
@@ -336,10 +331,9 @@ impl DefaultChatOrchestrator {
                 channel_id = %ctx.channel_id,
                 message_id = %ctx.message_id,
                 total_ms = timings.total_ms,
-                planner_ms = timings.planner_ms,
+                decision_ms = timings.decision_ms,
                 tool_execution_ms = timings.tool_execution_ms,
                 final_model_ms = timings.final_model_ms,
-                memory_write_ms = timings.memory_write_ms,
                 "slow reply detected"
             );
         } else {
@@ -349,10 +343,9 @@ impl DefaultChatOrchestrator {
                 channel_id = %ctx.channel_id,
                 message_id = %ctx.message_id,
                 total_ms = timings.total_ms,
-                planner_ms = timings.planner_ms,
+                decision_ms = timings.decision_ms,
                 tool_execution_ms = timings.tool_execution_ms,
                 final_model_ms = timings.final_model_ms,
-                memory_write_ms = timings.memory_write_ms,
                 "reply completed"
             );
         }

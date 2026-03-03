@@ -161,10 +161,10 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
     let cli_tool = CliTool::new(spogo_cli);
 
     if web_search.is_none() {
-        warn!("TAVILY_API_KEY not set; planner-selected web_search calls will fail");
+        warn!("TAVILY_API_KEY not set; model-selected web_search calls will fail");
     }
     if config.spogo_config_dir.trim().is_empty() {
-        warn!("SPOGO_CONFIG_DIR is empty; planner-selected cli spogo calls will fail");
+        warn!("SPOGO_CONFIG_DIR is empty; model-selected cli spogo calls will fail");
     }
 
     Arc::new(ToolRegistry {

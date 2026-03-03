@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{ModelProvider, ModelRequest};
+use super::{
+    ModelMessage, ModelMessageRole, ModelProvider, ModelRequest, ModelToolCall, ModelTurnRequest,
+    ModelTurnResponse,
+};
 
 #[derive(Debug, Default)]
 pub struct MockModelProvider;
@@ -20,75 +23,155 @@ impl ModelProvider for MockModelProvider {
             .to_string());
         }
 
-        if request
-            .system_prompt
-            .contains("You are the unified planner for CompanionPilot.")
-        {
-            let memory = if let Some(name) = extract_name(&request.user_prompt) {
-                json!({
-                    "store": true,
-                    "key": "name",
-                    "value": name,
-                    "confidence": 0.96
-                })
-            } else if let Some(game) = extract_game(&request.user_prompt) {
-                json!({
-                    "store": true,
-                    "key": "favorite_game",
-                    "value": game,
-                    "confidence": 0.84
-                })
-            } else {
-                json!({
-                    "store": false,
-                    "key": "",
-                    "value": "",
-                    "confidence": 0.0
-                })
-            };
-
-            let mut tool_calls = Vec::new();
-            if let Some(query) = extract_spotify_query(&request.user_prompt) {
-                tool_calls.push(json!({
-                    "tool_name": "cli",
-                    "args": {
-                        "command": format!("spogo search track {}", query)
-                    }
-                }));
-            } else if let Some(query) = extract_search_query(&request.user_prompt) {
-                tool_calls.push(json!({
-                    "tool_name": "web_search",
-                    "args": {
-                        "query": query,
-                        "max_results": 5
-                    }
-                }));
-            }
-            if extract_join_voice(&request.user_prompt) {
-                tool_calls.push(json!({
-                    "tool_name": "discord_voice_join",
-                    "args": {}
-                }));
-            }
-            if extract_leave_voice(&request.user_prompt) {
-                tool_calls.push(json!({
-                    "tool_name": "discord_voice_leave",
-                    "args": {}
-                }));
-            }
-
-            return Ok(json!({
-                "tool_calls": tool_calls,
-                "memory": memory,
-                "rationale": "mock_unified_planner"
-            })
-            .to_string());
-        }
-
         Ok(format!(
             "CompanionPilot mock reply.\n\nSystem: {}\n\nUser: {}",
             request.system_prompt, request.user_prompt
         ))
+    }
+
+    async fn complete_turn(&self, request: ModelTurnRequest) -> anyhow::Result<ModelTurnResponse> {
+        let user_input = latest_user_input(&request.messages);
+        let tool_messages = request
+            .messages
+            .iter()
+            .filter(|message| message.role == ModelMessageRole::Tool)
+            .collect::<Vec<_>>();
+
+        if user_input.contains("find a final answer using tools") {
+            if has_tool_output(&tool_messages, "result:beta") {
+                return Ok(ModelTurnResponse {
+                    assistant_text: "Final answer from native tool loop.".to_owned(),
+                    tool_calls: Vec::new(),
+                });
+            }
+
+            if has_tool_output(&tool_messages, "result:alpha") {
+                return Ok(ModelTurnResponse {
+                    assistant_text: String::new(),
+                    tool_calls: vec![tool_call(
+                        "call-beta",
+                        "web_search",
+                        json!({ "query": "beta", "max_results": 2 }),
+                    )],
+                });
+            }
+
+            return Ok(ModelTurnResponse {
+                assistant_text: String::new(),
+                tool_calls: vec![tool_call(
+                    "call-alpha",
+                    "web_search",
+                    json!({ "query": "alpha", "max_results": 3 }),
+                )],
+            });
+        }
+
+        if !tool_messages.is_empty() {
+            let joined = tool_messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            return Ok(ModelTurnResponse {
+                assistant_text: format!("Tool summary:\n{joined}"),
+                tool_calls: Vec::new(),
+            });
+        }
+
+        let mut tool_calls = Vec::new();
+        if let Some(name) = extract_name(&user_input) {
+            tool_calls.push(tool_call(
+                "call-store-name",
+                "store_memory",
+                json!({
+                    "key": "name",
+                    "value": name,
+                    "confidence": 0.96
+                }),
+            ));
+        }
+        if let Some(game) = extract_game(&user_input) {
+            tool_calls.push(tool_call(
+                "call-store-game",
+                "store_memory",
+                json!({
+                    "key": "favorite_game",
+                    "value": game,
+                    "confidence": 0.84
+                }),
+            ));
+        }
+        if let Some(query) = extract_search_query(&user_input) {
+            tool_calls.push(tool_call(
+                "call-web-search",
+                "web_search",
+                json!({
+                    "query": query,
+                    "max_results": 5
+                }),
+            ));
+        }
+        if let Some(query) = extract_spotify_query(&user_input) {
+            tool_calls.push(tool_call(
+                "call-cli",
+                "cli",
+                json!({
+                    "command": format!("spogo search track {query}")
+                }),
+            ));
+        }
+        if extract_join_voice(&user_input) {
+            tool_calls.push(tool_call(
+                "call-join-voice",
+                "discord_voice_join",
+                json!({}),
+            ));
+        }
+        if extract_leave_voice(&user_input) {
+            tool_calls.push(tool_call(
+                "call-leave-voice",
+                "discord_voice_leave",
+                json!({}),
+            ));
+        }
+
+        if !tool_calls.is_empty() {
+            return Ok(ModelTurnResponse {
+                assistant_text: String::new(),
+                tool_calls,
+            });
+        }
+
+        Ok(ModelTurnResponse {
+            assistant_text: format!("CompanionPilot mock reply to: {user_input}"),
+            tool_calls: Vec::new(),
+        })
+    }
+}
+
+fn latest_user_input(messages: &[ModelMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == ModelMessageRole::User)
+        .map(|message| message.content.clone())
+        .unwrap_or_default()
+}
+
+fn has_tool_output(messages: &[&ModelMessage], needle: &str) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .to_lowercase()
+            .contains(&needle.to_lowercase())
+    })
+}
+
+fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ModelToolCall {
+    ModelToolCall {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        arguments,
     }
 }
 

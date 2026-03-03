@@ -362,7 +362,7 @@ async fn api_list_decisions(
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
     let decisions = state
         .memory
-        .list_planner_decisions(&user_id, query.limit)
+        .list_orchestration_decisions(&user_id, query.limit)
         .await
         .map_err(internal_error)?;
     Ok(Json(decisions))
@@ -374,7 +374,7 @@ async fn api_clear_decisions(
 ) -> Result<Json<DeletedResponse>, (axum::http::StatusCode, String)> {
     let deleted = state
         .memory
-        .clear_planner_decisions(&user_id)
+        .clear_orchestration_decisions(&user_id)
         .await
         .map_err(internal_error)?;
     Ok(Json(DeletedResponse { deleted }))

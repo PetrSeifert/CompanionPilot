@@ -14,7 +14,7 @@ pub(super) fn build_skill_selector_prompt(
     memory: &MemoryContext,
     skill_metadata: &[SkillMetadata],
 ) -> String {
-    let context_block = build_planner_context_block(memory);
+    let context_block = build_context_block(memory);
     let skill_inventory = build_skill_inventory_for_selector(skill_metadata);
 
     format!(
@@ -37,76 +37,33 @@ Available skills:
     )
 }
 
-pub(super) fn build_unified_planner_prompt(
+pub(super) fn build_native_agent_system_prompt(
     memory: &MemoryContext,
+    override_prompt: Option<&str>,
     selected_skills: &[SkillDefinition],
 ) -> String {
+    let mut sections = if let Some(prompt) = override_prompt {
+        vec![prompt.to_owned()]
+    } else {
+        vec![default_system_prompt_base().to_owned()]
+    };
+
+    sections.push(
+        "Use tools natively when needed. Prefer direct answers when tools are unnecessary.
+When you need current/news/price/weather/factual verification, call `web_search`.
+For Spotify operations, call `cli` using `spogo` commands only.
+Use `current_datetime` when the request depends on current date/time context.
+If a durable user fact is stated or corrected, call `store_memory` with key/value/confidence.
+Do not emit pseudo tool-call markup in normal text responses."
+            .to_owned(),
+    );
+
     let context_block = build_support_context_block(memory, selected_skills);
+    if !context_block.is_empty() {
+        sections.push(context_block.trim().to_owned());
+    }
 
-    format!(
-        "You are the unified planner for CompanionPilot.
-Decide both tool usage and memory write for one user message.
-Return strict JSON only (no markdown, no prose) with this exact schema:
-{{
-  \"tool_calls\": [{{\"tool_name\":\"...\",\"args\":{{...}}}}],
-  \"memory\": {{
-    \"store\": true|false,
-    \"key\": \"...\",
-    \"value\": \"...\",
-    \"confidence\": 0.0-1.0
-  }},
-  \"rationale\": \"short reason\"
-}}
-Tool calls are executed sequentially in listed order.
-There are no manual commands or manual overrides: all tool usage must come from this decision.
-If no tool is needed, return an empty tool_calls array.
-If memory should not be stored, set store=false and key/value to empty strings.
-Store only durable personal facts (identity, preferences, recurring goals, corrections).
-Do not store one-off requests or transient states.
-Use web search for latest/current/news/prices/weather or unknown factual claims.
-For Spotify requests, use cli for local spogo commands.
-cli has a strict policy: only commands starting with `spogo` are allowed; any other command will be blocked.
-If uncertain about spogo usage, first call cli with command \"spogo -h\" or \"spogo <subcommand> -h\".
-For time-sensitive requests, call current_datetime before web_search so queries and answers are anchored to real current time.
-If current_datetime is needed, request only current_datetime in this decision and wait for its output before planning web_search.
-Tool inventory:
-{}
-{}",
-        build_tool_inventory_for_planner(),
-        context_block
-    )
-}
-
-pub(super) fn build_tool_followup_prompt(
-    memory: &MemoryContext,
-    selected_skills: &[SkillDefinition],
-) -> String {
-    let context_block = build_support_context_block(memory, selected_skills);
-
-    format!(
-        "You are the tool follow-up planner for CompanionPilot.
-Decide whether the current evidence is enough for a final user-facing answer, or whether more tool calls are needed.
-Return strict JSON only (no markdown, no prose) with this exact schema:
-{{
-  \"action\": \"final\"|\"tools\",
-  \"final_answer\": \"non-empty only when action=final\",
-  \"tool_calls\": [{{\"tool_name\":\"...\",\"args\":{{...}}}}],
-  \"rationale\": \"short reason\"
-}}
-If action=final, provide the complete final answer and return an empty tool_calls array.
-If action=tools, final_answer must be empty and tool_calls must contain at least one valid call.
-Only request tools when the current outputs are insufficient or conflicting.
-For time-sensitive requests, prefer calling current_datetime before additional web_search calls.
-For Spotify requests, use cli for local spogo commands.
-cli has a strict policy: only commands starting with `spogo` are allowed; any other command will be blocked.
-If uncertain about spogo usage, call cli with command \"spogo -h\" or \"spogo <subcommand> -h\" before guessing.
-If current_datetime is needed, call it alone first, then plan web_search in a later tool round.
-Tool inventory:
-{}
-{}",
-        build_tool_inventory_for_planner(),
-        context_block
-    )
+    sections.join("\n\n")
 }
 
 pub(super) fn build_support_context_block(
@@ -114,10 +71,11 @@ pub(super) fn build_support_context_block(
     selected_skills: &[SkillDefinition],
 ) -> String {
     let mut sections = Vec::new();
-    let planner_context = build_planner_context_block(memory);
-    if !planner_context.is_empty() {
-        sections.push(planner_context.trim().to_owned());
+    let context = build_context_block(memory);
+    if !context.is_empty() {
+        sections.push(context.trim().to_owned());
     }
+
     let selected_skills_block = build_selected_skill_context_block(selected_skills);
     if !selected_skills_block.is_empty() {
         sections.push(selected_skills_block);
@@ -128,22 +86,6 @@ pub(super) fn build_support_context_block(
     } else {
         format!("{}\n", sections.join("\n\n"))
     }
-}
-
-fn build_skill_inventory_for_selector(skill_metadata: &[SkillMetadata]) -> String {
-    let inventory = skill_metadata
-        .iter()
-        .map(|skill| {
-            json!({
-                "id": &skill.id,
-                "title": &skill.title,
-                "description": &skill.description,
-                "tags": &skill.tags,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    serde_json::to_string_pretty(&inventory).unwrap_or_else(|_| "[]".to_owned())
 }
 
 pub(super) fn build_selected_skill_context_block(selected_skills: &[SkillDefinition]) -> String {
@@ -180,7 +122,12 @@ pub(super) fn build_selected_skill_context_block(selected_skills: &[SkillDefinit
     format!("Selected skills guidance:\n{lines}")
 }
 
-fn build_planner_context_block(memory: &MemoryContext) -> String {
+pub(super) fn default_system_prompt_base() -> &'static str {
+    "You are CompanionPilot, a helpful Discord AI companion.
+Keep replies concise and practical."
+}
+
+fn build_context_block(memory: &MemoryContext) -> String {
     let mut context_lines = Vec::new();
     if let Some(summary) = &memory.summary {
         context_lines.push(format!("Conversation summary: {summary}"));
@@ -207,87 +154,20 @@ fn build_planner_context_block(memory: &MemoryContext) -> String {
     }
 }
 
-fn build_tool_inventory_for_planner() -> &'static str {
-    r#"[
-  {
-    "tool_name": "current_datetime",
-    "args_schema": {},
-    "when_to_use": "Need the exact current date/time before time-sensitive lookups or answers.",
-    "when_not_to_use": "Question is timeless or explicitly historical."
-  },
-  {
-    "tool_name": "cli",
-    "args_schema": {
-      "command": "string (recommended, raw shell-like command; must start with `spogo`)",
-      "args": "array<string> or string (optional alternative to command; if used must start with `spogo` token)"
-    },
-    "when_to_use": "Need Spotify operations via local spogo CLI, or need to inspect spogo help/usage via -h.",
-    "when_not_to_use": "Request is unrelated to spogo/Spotify."
-  },
-  {
-    "tool_name": "web_search",
-    "args_schema": {
-      "query": "string (required, non-empty)",
-      "max_results": "integer 1-10 (optional, default 5)"
-    },
-    "when_to_use": "Need external factual information, latest/current info, or web-sourced recommendations.",
-    "when_not_to_use": "Casual chat, personal memory recall, or when the answer can be provided from context."
-  },
-  {
-    "tool_name": "discord_voice_join",
-    "args_schema": {
-      "channel_id": "string Discord channel id (optional; defaults to requester's current voice channel)"
-    },
-    "when_to_use": "User explicitly asks the assistant to join voice.",
-    "when_not_to_use": "User did not request voice channel participation."
-  },
-  {
-    "tool_name": "discord_voice_leave",
-    "args_schema": {},
-    "when_to_use": "User explicitly asks assistant to leave voice or stop voice interaction.",
-    "when_not_to_use": "Bot is not connected to voice."
-  }
-]"#
-}
+fn build_skill_inventory_for_selector(skill_metadata: &[SkillMetadata]) -> String {
+    let inventory = skill_metadata
+        .iter()
+        .map(|skill| {
+            json!({
+                "id": &skill.id,
+                "title": &skill.title,
+                "description": &skill.description,
+                "tags": &skill.tags,
+            })
+        })
+        .collect::<Vec<_>>();
 
-const DEFAULT_SYSTEM_PROMPT_BASE: &str = "You are CompanionPilot, a helpful Discord AI companion.\nKeep replies concise and practical.\nNever emit XML/JSON/pseudo tool-call markup in normal replies.";
-
-pub(super) fn default_system_prompt_base() -> &'static str {
-    DEFAULT_SYSTEM_PROMPT_BASE
-}
-
-pub(super) fn build_system_prompt(
-    memory: &MemoryContext,
-    override_prompt: Option<&str>,
-    selected_skills: &[SkillDefinition],
-) -> String {
-    let mut sections = if let Some(prompt) = override_prompt {
-        vec![prompt.to_owned()]
-    } else {
-        vec![DEFAULT_SYSTEM_PROMPT_BASE.to_owned()]
-    };
-
-    if let Some(summary) = &memory.summary {
-        sections.push(format!("Conversation summary: {summary}"));
-    }
-
-    if !memory.recent_messages.is_empty() {
-        sections.push(build_recent_context_block(&memory.recent_messages));
-    }
-
-    if !memory.facts.is_empty() {
-        let lines = memory
-            .facts
-            .iter()
-            .map(|fact| format!("{} = {}", fact.key, fact.value))
-            .collect::<Vec<_>>()
-            .join("; ");
-        sections.push(format!("Known user facts: {lines}"));
-    }
-
-    sections.push(build_selected_skill_context_block(selected_skills));
-
-    sections.join("\n")
+    serde_json::to_string_pretty(&inventory).unwrap_or_else(|_| "[]".to_owned())
 }
 
 fn build_recent_context_block(recent_messages: &[String]) -> String {

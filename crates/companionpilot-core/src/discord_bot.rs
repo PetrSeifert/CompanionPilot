@@ -17,7 +17,8 @@ use tracing::{error, info, warn};
 use crate::{
     orchestrator::{DefaultChatOrchestrator, SLOW_REPLY_THRESHOLD_MS},
     runtime_settings::RuntimeSettingsManager,
-    types::MessageCtx, voice::VoiceManager,
+    types::MessageCtx,
+    voice::VoiceManager,
 };
 
 const DISCORD_MESSAGE_MAX_CHARS: usize = 2_000;
@@ -115,7 +116,7 @@ impl EventHandler for Handler {
                         channel_id = %msg.channel_id,
                         message_id = %msg.id,
                         total_ms = reply.timings.total_ms,
-                        planner_ms = reply.timings.planner_ms,
+                        decision_ms = reply.timings.decision_ms,
                         tool_execution_ms = reply.timings.tool_execution_ms,
                         final_model_ms = reply.timings.final_model_ms,
                         "slow Discord reply detected"
@@ -126,7 +127,7 @@ impl EventHandler for Handler {
                         channel_id = %msg.channel_id,
                         message_id = %msg.id,
                         total_ms = reply.timings.total_ms,
-                        planner_ms = reply.timings.planner_ms,
+                        decision_ms = reply.timings.decision_ms,
                         tool_execution_ms = reply.timings.tool_execution_ms,
                         final_model_ms = reply.timings.final_model_ms,
                         "Discord reply ready"

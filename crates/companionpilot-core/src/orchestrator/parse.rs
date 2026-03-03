@@ -1,14 +1,6 @@
 use serde::de::DeserializeOwned;
 
-use super::contracts::{SkillSelectionPlan, ToolFollowupPlan, UnifiedPlan};
-
-pub(super) fn parse_unified_plan(raw: &str) -> Result<UnifiedPlan, serde_json::Error> {
-    parse_json_plan(raw)
-}
-
-pub(super) fn parse_tool_followup_plan(raw: &str) -> Result<ToolFollowupPlan, serde_json::Error> {
-    parse_json_plan(raw)
-}
+use super::contracts::SkillSelectionPlan;
 
 pub(super) fn parse_skill_selection_plan(
     raw: &str,
