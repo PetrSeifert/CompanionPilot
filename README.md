@@ -15,10 +15,7 @@ Workspace layout:
 - Memory abstraction (`PostgresMemoryStore`, `InMemoryMemoryStore`)
 - Tool runtime with Tavily web search support
 - Built-in `current_datetime` tool for UTC date/time grounding
-- Built-in `spogo_status` tool for current Spotify playback (shared account)
-- Built-in `spogo_control` tool for Spotify playback control via local `spogo` CLI
-- Built-in `spogo_search` tool for Spotify catalog search via local `spogo` CLI
-- Built-in `cli` tool for raw CLI command execution with `spogo`-only enforcement
+- Built-in `cli` tool for Spotify command execution with `spogo`-only enforcement
 - HTTP API for health and chat (`axum`)
 - Reply timing telemetry (planner/tools/model/memory stage durations)
 - Local dev infra (`docker-compose` with Postgres + Redis)
@@ -80,10 +77,7 @@ curl -X POST http://localhost:8080/chat \
 - Mention the bot or DM it.
 - CompanionPilot decides tool usage automatically from a unified planner decision.
 - For time-sensitive requests, planner can call `current_datetime` before `web_search`.
-- For Spotify playback status requests, planner can call `spogo_status`.
-- For Spotify playback control requests, planner can call `spogo_control` with action-specific args.
-- For Spotify catalog lookup requests, planner can call `spogo_search` with `q` + `type` and optional CLI-native filters.
-- For any advanced `spogo` operation not covered above, planner can call `cli` with `command` (for example `spogo -h`).
+- For Spotify operations, planner uses `cli` with `command` (for example `spogo status` or `spogo search track muse`).
 - `cli` blocks any non-`spogo` command and returns a clear "not allowed" error.
 - Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
@@ -91,14 +85,13 @@ curl -X POST http://localhost:8080/chat \
 - Voice mode is optional and tool-call driven: configure `VOICE_ENABLED=true`, `VOICE_ALLOWLIST`, and `OPENAI_API_KEY` to allow AI-planned `discord_voice_join`, `discord_voice_listen_turn`, and `discord_voice_leave`.
 - After `discord_voice_join`, CompanionPilot now listens continuously for natural voice turns (no text trigger required), runs STT, and replies in voice with TTS while persisting transcript/reply to memory/dashboard.
 
-## Spogo setup (Spotify tools)
+## Spogo setup (Spotify CLI)
 
-- Spotify control/search/status requires `spogo` in the runtime image (included by `Dockerfile`).
+- Spotify features require `spogo` in the runtime image (included by `Dockerfile`).
 - Configure:
   - `SPOGO_BIN_PATH` (default `/usr/local/bin/spogo`)
   - `SPOGO_CONFIG_DIR` (default `/data/spogo`, should be a Railway volume mount)
   - `SPOGO_TIMEOUT_MS` (default `8000`)
-  - `SPOGO_ACCOUNT_LABEL` (optional label shown in tool responses)
 - Use a persistent Railway volume for `SPOGO_CONFIG_DIR` so auth/session data survives restarts and deploys.
 - Import Spotify auth into the mounted config path before using tools, for example:
 
@@ -145,7 +138,6 @@ Then look for:
 - `tool call selected by unified planner` (tool + args selected)
 - `tool call completed` (tool finished)
 - `tavily web search start` / `tavily web search success` (actual Tavily call path)
-- `spogo search request start` (actual spogo search call path)
 - `spogo command start` / `spogo command failed` (CLI invocation path)
 - `planner fallback: running without tools and without memory write` (planner failure fallback)
 - `reply completed` (per-message timing summary)

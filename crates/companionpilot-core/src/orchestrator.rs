@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -848,8 +848,7 @@ If memory should not be stored, set store=false and key/value to empty strings.
 Store only durable personal facts (identity, preferences, recurring goals, corrections).
 Do not store one-off requests or transient states.
 Use web search for latest/current/news/prices/weather or unknown factual claims.
-Prefer spogo_search for Spotify catalog lookup requests (tracks, artists, albums, playlists).
-For advanced or unsupported Spotify operations, use cli for raw terminal commands.
+For Spotify requests, use cli for local spogo commands.
 cli has a strict policy: only commands starting with `spogo` are allowed; any other command will be blocked.
 If uncertain about spogo usage, first call cli with command \"spogo -h\" or \"spogo <subcommand> -h\".
 For time-sensitive requests, call current_datetime before web_search so queries and answers are anchored to real current time.
@@ -879,8 +878,7 @@ If action=final, provide the complete final answer and return an empty tool_call
 If action=tools, final_answer must be empty and tool_calls must contain at least one valid call.
 Only request tools when the current outputs are insufficient or conflicting.
 For time-sensitive requests, prefer calling current_datetime before additional web_search calls.
-Prefer spogo_search for Spotify catalog lookup requests (tracks, artists, albums, playlists).
-For advanced or unsupported Spotify operations, use cli for raw terminal commands.
+For Spotify requests, use cli for local spogo commands.
 cli has a strict policy: only commands starting with `spogo` are allowed; any other command will be blocked.
 If uncertain about spogo usage, call cli with command \"spogo -h\" or \"spogo <subcommand> -h\" before guessing.
 If current_datetime is needed, call it alone first, then plan web_search in a later tool round.
@@ -933,42 +931,8 @@ fn build_tool_inventory_for_planner() -> &'static str {
       "command": "string (recommended, raw shell-like command; must start with `spogo`)",
       "args": "array<string> or string (optional alternative to command; if used must start with `spogo` token)"
     },
-    "when_to_use": "Need full spogo feature coverage not exposed by typed spogo tools, or need to inspect help/usage via -h.",
-    "when_not_to_use": "Request is unrelated to spogo/Spotify, or a typed tool (spogo_status|spogo_control|spogo_search) cleanly covers the request."
-  },
-  {
-    "tool_name": "spogo_status",
-    "args_schema": {},
-    "when_to_use": "Need the currently playing Spotify track/status from the configured shared account.",
-    "when_not_to_use": "Question is unrelated to Spotify playback."
-  },
-  {
-    "tool_name": "spogo_control",
-    "args_schema": {
-      "action": "string (required, one of play|pause|toggle|next|previous|shuffle|repeat|seek|volume|playback|queue|transfer)",
-      "device_id": "string (optional)",
-      "state": "boolean for shuffle OR string off|track|context for repeat (optional)",
-      "position_ms": "integer >= 0 (required for seek, optional for playback)",
-      "volume": "integer 0-100 (required for volume)",
-      "uris": "array<string> (optional for playback)",
-      "context_uri": "string (optional for playback)",
-      "uri": "string (required for queue)",
-      "device_ids": "array<string> (required for transfer)",
-      "play": "boolean (optional for transfer)"
-    },
-    "when_to_use": "Need to control Spotify playback for the configured shared account.",
-    "when_not_to_use": "Only reading playback status or request is unrelated to Spotify playback control."
-  },
-  {
-    "tool_name": "spogo_search",
-    "args_schema": {
-      "q": "string (required, non-empty search query)",
-      "type": "string or array<string> (required, supported: track|artist|album|playlist|show|episode|audiobook)",
-      "limit": "integer 1-50 (optional, default from API)",
-      "offset": "integer 0-1000 (optional, default 0)"
-    },
-    "when_to_use": "Need Spotify-native catalog results instead of general web search.",
-    "when_not_to_use": "Request is not about finding Spotify catalog items."
+    "when_to_use": "Need Spotify operations via local spogo CLI, or need to inspect spogo help/usage via -h.",
+    "when_not_to_use": "Request is unrelated to spogo/Spotify."
   },
   {
     "tool_name": "web_search",
@@ -1033,32 +997,6 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
                     });
                 } else {
                     debug!("dropping planner cli call with invalid args");
-                }
-            }
-            "spogo_status" => {
-                sanitized_calls.push(ToolCall {
-                    tool_name: "spogo_status".to_owned(),
-                    args: json!({}),
-                });
-            }
-            "spogo_control" => {
-                if let Some(args) = sanitize_spogo_control_args(&planned_call.args) {
-                    sanitized_calls.push(ToolCall {
-                        tool_name: "spogo_control".to_owned(),
-                        args,
-                    });
-                } else {
-                    debug!("dropping planner spogo_control call with invalid args");
-                }
-            }
-            "spogo_search" => {
-                if let Some(args) = sanitize_spogo_search_args(&planned_call.args) {
-                    sanitized_calls.push(ToolCall {
-                        tool_name: "spogo_search".to_owned(),
-                        args,
-                    });
-                } else {
-                    debug!("dropping planner spogo_search call with invalid args");
                 }
             }
             "web_search" => {
@@ -1146,173 +1084,6 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
     }
 
     sanitized_calls
-}
-
-fn sanitize_spogo_control_args(raw_args: &Value) -> Option<Value> {
-    let action = raw_args
-        .get("action")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| is_supported_spogo_control_action(value))?;
-
-    let mut args = Map::new();
-    args.insert("action".to_owned(), Value::String(action));
-
-    if let Some(device_id) = raw_args
-        .get("device_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        args.insert("device_id".to_owned(), Value::String(device_id.to_owned()));
-    }
-
-    if let Some(state) = raw_args.get("state") {
-        match state {
-            Value::Bool(value) => {
-                args.insert("state".to_owned(), Value::Bool(*value));
-            }
-            Value::String(value) => {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    args.insert("state".to_owned(), Value::String(trimmed.to_owned()));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if let Some(position_ms) = raw_args.get("position_ms").and_then(Value::as_u64) {
-        args.insert("position_ms".to_owned(), json!(position_ms));
-    }
-    if let Some(volume) = raw_args.get("volume").and_then(Value::as_u64) {
-        args.insert("volume".to_owned(), json!(volume));
-    }
-
-    if let Some(uris) = sanitize_string_array(raw_args.get("uris")) {
-        args.insert("uris".to_owned(), json!(uris));
-    }
-
-    if let Some(context_uri) = raw_args
-        .get("context_uri")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        args.insert(
-            "context_uri".to_owned(),
-            Value::String(context_uri.to_owned()),
-        );
-    }
-
-    if let Some(uri) = raw_args
-        .get("uri")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        args.insert("uri".to_owned(), Value::String(uri.to_owned()));
-    }
-
-    if let Some(device_ids) = sanitize_string_array(raw_args.get("device_ids")) {
-        args.insert("device_ids".to_owned(), json!(device_ids));
-    }
-
-    if let Some(play) = raw_args.get("play").and_then(Value::as_bool) {
-        args.insert("play".to_owned(), Value::Bool(play));
-    }
-
-    Some(Value::Object(args))
-}
-
-fn sanitize_spogo_search_args(raw_args: &Value) -> Option<Value> {
-    let query = raw_args
-        .get("q")
-        .or_else(|| raw_args.get("query"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let search_type = sanitize_spogo_search_type(raw_args.get("type"))?;
-
-    let mut args = Map::new();
-    args.insert("q".to_owned(), Value::String(query.to_owned()));
-    args.insert("type".to_owned(), Value::String(search_type));
-
-    if let Some(limit) = raw_args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .map(|value| value.clamp(1, 50))
-    {
-        args.insert("limit".to_owned(), json!(limit));
-    }
-
-    if let Some(offset) = raw_args
-        .get("offset")
-        .and_then(Value::as_u64)
-        .map(|value| value.clamp(0, 1000))
-    {
-        args.insert("offset".to_owned(), json!(offset));
-    }
-
-    Some(Value::Object(args))
-}
-
-fn sanitize_spogo_search_type(value: Option<&Value>) -> Option<String> {
-    let value = match value? {
-        Value::String(value) => value.trim().to_ascii_lowercase(),
-        Value::Array(values) => values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .find(|item| !item.is_empty())
-            .map(|item| item.to_ascii_lowercase())?,
-        _ => return None,
-    };
-    if value.is_empty() || !is_supported_spogo_search_type(&value) {
-        return None;
-    }
-    Some(value)
-}
-
-fn sanitize_string_array(value: Option<&Value>) -> Option<Vec<String>> {
-    let array = value?.as_array()?;
-    let sanitized = array
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if sanitized.is_empty() {
-        None
-    } else {
-        Some(sanitized)
-    }
-}
-
-fn is_supported_spogo_search_type(value: &str) -> bool {
-    matches!(
-        value,
-        "album" | "artist" | "playlist" | "track" | "show" | "episode" | "audiobook"
-    )
-}
-
-fn is_supported_spogo_control_action(action: &str) -> bool {
-    matches!(
-        action,
-        "play"
-            | "pause"
-            | "toggle"
-            | "next"
-            | "previous"
-            | "shuffle"
-            | "repeat"
-            | "seek"
-            | "volume"
-            | "playback"
-            | "queue"
-            | "transfer"
-    )
 }
 
 fn enforce_datetime_planning_boundary(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
@@ -2035,73 +1806,6 @@ mod tests {
             .as_str()
             .expect("query should be a string");
         assert_eq!(query, "current weather in berlin");
-    }
-
-    #[test]
-    fn sanitize_planned_tool_calls_allows_spogo_status() {
-        let planned_calls = vec![PlannedToolCall {
-            tool_name: "spogo_status".to_owned(),
-            args: json!({"ignored": true}),
-        }];
-
-        let sanitized = sanitize_planned_tool_calls(planned_calls);
-        assert_eq!(sanitized.len(), 1);
-        assert_eq!(sanitized[0].tool_name, "spogo_status");
-        assert_eq!(sanitized[0].args, json!({}));
-    }
-
-    #[test]
-    fn sanitize_planned_tool_calls_allows_spogo_control() {
-        let planned_calls = vec![PlannedToolCall {
-            tool_name: "spogo_control".to_owned(),
-            args: json!({
-                "action": "NEXT",
-                "device_id": "dev-1",
-                "ignored_field": "x"
-            }),
-        }];
-
-        let sanitized = sanitize_planned_tool_calls(planned_calls);
-        assert_eq!(sanitized.len(), 1);
-        assert_eq!(sanitized[0].tool_name, "spogo_control");
-        assert_eq!(sanitized[0].args["action"], "next");
-        assert_eq!(sanitized[0].args["device_id"], "dev-1");
-        assert!(sanitized[0].args.get("ignored_field").is_none());
-    }
-
-    #[test]
-    fn sanitize_planned_tool_calls_allows_spogo_search() {
-        let planned_calls = vec![PlannedToolCall {
-            tool_name: "spogo_search".to_owned(),
-            args: json!({
-                "q": "  daft punk  ",
-                "type": ["", "track", "artist"],
-                "limit": 99,
-                "offset": 2001
-            }),
-        }];
-
-        let sanitized = sanitize_planned_tool_calls(planned_calls);
-        assert_eq!(sanitized.len(), 1);
-        assert_eq!(sanitized[0].tool_name, "spogo_search");
-        assert_eq!(sanitized[0].args["q"], "daft punk");
-        assert_eq!(sanitized[0].args["type"], "track");
-        assert_eq!(sanitized[0].args["limit"], 50);
-        assert_eq!(sanitized[0].args["offset"], 1000);
-    }
-
-    #[test]
-    fn sanitize_planned_tool_calls_drops_spogo_search_without_required_args() {
-        let planned_calls = vec![PlannedToolCall {
-            tool_name: "spogo_search".to_owned(),
-            args: json!({
-                "q": "",
-                "type": "invalid"
-            }),
-        }];
-
-        let sanitized = sanitize_planned_tool_calls(planned_calls);
-        assert!(sanitized.is_empty());
     }
 
     #[test]

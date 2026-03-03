@@ -1,9 +1,6 @@
 mod current_datetime;
 mod spogo_cli;
 mod spogo_cli_tool;
-mod spogo_control;
-mod spogo_search;
-mod spogo_status;
 mod web_search;
 
 use std::sync::Arc;
@@ -17,9 +14,6 @@ pub use current_datetime::CurrentDateTimeTool;
 pub use spogo_cli::{DEFAULT_SPOGO_BIN_PATH, DEFAULT_SPOGO_TIMEOUT_MS, SpogoCli};
 pub use spogo_cli_tool::CliTool;
 pub(crate) use spogo_cli_tool::sanitize_cli_invocation_args;
-pub use spogo_control::SpogoControlTool;
-pub use spogo_search::SpogoSearchTool;
-pub use spogo_status::SpogoStatusTool;
 pub use web_search::TavilyWebSearchTool;
 
 #[derive(Debug, Clone)]
@@ -42,9 +36,6 @@ pub trait ToolExecutor: Send + Sync {
 pub struct ToolRegistry {
     pub current_datetime: CurrentDateTimeTool,
     pub cli: CliTool,
-    pub spogo_control: SpogoControlTool,
-    pub spogo_status: SpogoStatusTool,
-    pub spogo_search: SpogoSearchTool,
     pub web_search: Option<TavilyWebSearchTool>,
     pub voice: Option<Arc<VoiceManager>>,
 }
@@ -60,9 +51,6 @@ impl ToolExecutor for ToolRegistry {
         match tool_name {
             "current_datetime" => self.current_datetime.get_now(args).await,
             "cli" => self.cli.execute_command(args).await,
-            "spogo_control" => self.spogo_control.control(args).await,
-            "spogo_status" => self.spogo_status.get_status(args).await,
-            "spogo_search" => self.spogo_search.search(args).await,
             "web_search" => {
                 let tool = self
                     .web_search

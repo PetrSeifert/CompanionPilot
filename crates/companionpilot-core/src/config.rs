@@ -17,7 +17,6 @@ pub struct AppConfig {
     pub spogo_bin_path: String,
     pub spogo_config_dir: String,
     pub spogo_timeout_ms: u64,
-    pub spogo_account_label: Option<String>,
     pub tavily_api_key: Option<String>,
     pub database_url: Option<String>,
     pub api_auth_token: Option<String>,
@@ -58,7 +57,6 @@ impl AppConfig {
             spogo_config_dir: env::var("SPOGO_CONFIG_DIR")
                 .unwrap_or_else(|_| "/data/spogo".to_owned()),
             spogo_timeout_ms: env_u64("SPOGO_TIMEOUT_MS", crate::tools::DEFAULT_SPOGO_TIMEOUT_MS),
-            spogo_account_label: env::var("SPOGO_ACCOUNT_LABEL").ok(),
             tavily_api_key: env::var("TAVILY_API_KEY").ok(),
             database_url: env::var("DATABASE_URL").ok(),
             api_auth_token: env::var("API_AUTH_TOKEN").ok(),

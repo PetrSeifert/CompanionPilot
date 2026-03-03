@@ -13,8 +13,7 @@ use companionpilot_core::{
     },
     safety::SafetyPolicy,
     tools::{
-        CliTool, CurrentDateTimeTool, SpogoCli, SpogoControlTool, SpogoSearchTool, SpogoStatusTool,
-        TavilyWebSearchTool, ToolExecutor, ToolRegistry,
+        CliTool, CurrentDateTimeTool, SpogoCli, TavilyWebSearchTool, ToolExecutor, ToolRegistry,
     },
     voice::{VoiceManager, VoiceRuntimeConfig},
 };
@@ -142,25 +141,18 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
         config.spogo_config_dir.clone(),
         config.spogo_timeout_ms,
     );
-    let spogo_control =
-        SpogoControlTool::new(spogo_cli.clone(), config.spogo_account_label.clone());
-    let spogo_status = SpogoStatusTool::new(spogo_cli.clone(), config.spogo_account_label.clone());
-    let cli_tool = CliTool::new(spogo_cli.clone());
-    let spogo_search = SpogoSearchTool::new(spogo_cli);
+    let cli_tool = CliTool::new(spogo_cli);
 
     if web_search.is_none() {
         warn!("TAVILY_API_KEY not set; planner-selected web_search calls will fail");
     }
     if config.spogo_config_dir.trim().is_empty() {
-        warn!("SPOGO_CONFIG_DIR is empty; planner-selected spogo tool calls will fail");
+        warn!("SPOGO_CONFIG_DIR is empty; planner-selected cli spogo calls will fail");
     }
 
     Arc::new(ToolRegistry {
         current_datetime: CurrentDateTimeTool,
         cli: cli_tool,
-        spogo_control,
-        spogo_status,
-        spogo_search,
         web_search,
         voice,
     })
