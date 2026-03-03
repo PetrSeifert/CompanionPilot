@@ -59,10 +59,16 @@ async fn main() -> anyhow::Result<()> {
     if config.redis_url.is_none() {
         warn!("REDIS_URL is not configured; using stateless in-process cache only");
     }
+    if config.api_auth_token.is_none() {
+        warn!(
+            "API_AUTH_TOKEN is not configured; protected HTTP endpoints will return 503 until configured"
+        );
+    }
 
     let app = http::router(AppState {
         orchestrator,
         memory: memory_for_dashboard,
+        api_auth_token: config.api_auth_token.clone(),
     });
     let listener = TcpListener::bind(config.http_bind).await?;
     info!("CompanionPilot HTTP API listening on {}", config.http_bind);

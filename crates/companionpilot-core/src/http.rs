@@ -3,7 +3,9 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::header,
+    http::{Request, StatusCode, header},
+    middleware::{self, Next},
+    response::Response,
     response::IntoResponse,
     routing::{delete, get, post},
 };
@@ -23,6 +25,7 @@ static DASHBOARD_HTML: &str = include_str!("dashboard.html");
 pub struct AppState {
     pub orchestrator: Arc<DefaultChatOrchestrator>,
     pub memory: Arc<dyn MemoryStore>,
+    pub api_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,9 +67,7 @@ struct DeletedBoolResponse {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(index))
-        .route("/health", get(health))
+    let protected = Router::new()
         .route("/chat", post(chat))
         .route("/dashboard", get(dashboard))
         .route("/api/users", get(api_list_users))
@@ -91,8 +92,48 @@ pub fn router(state: AppState) -> Router {
             "/api/users/{user_id}/latencies",
             get(api_list_message_latencies).delete(api_clear_message_latencies),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer_auth,
+        ));
+
+    Router::new()
+        .route("/", get(index))
+        .route("/health", get(health))
+        .merge(protected)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn require_bearer_auth(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    let expected_token = state
+        .api_auth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "API auth token is not configured".to_owned(),
+        ))?;
+
+    let provided_token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|raw| raw.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    if provided_token != Some(expected_token) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid bearer token".to_owned(),
+        ));
+    }
+
+    Ok(next.run(request).await)
 }
 
 async fn index() -> &'static str {
