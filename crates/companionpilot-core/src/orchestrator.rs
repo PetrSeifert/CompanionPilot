@@ -10,9 +10,9 @@ use crate::{
     memory::MemoryStore,
     model::{ModelProvider, ModelRequest},
     safety::SafetyPolicy,
-    tools::{ToolExecutor, sanitize_cli_invocation_args},
+    tools::{ToolExecutor, get_tool_skill, sanitize_cli_invocation_args},
     types::{
-        ChatMessageRecord, ChatRole, MemoryFact, MessageCtx, MessageLatencyRecord,
+        ChatMessageRecord, ChatRole, MemoryContext, MemoryFact, MessageCtx, MessageLatencyRecord,
         OrchestratorReply, PlannerDecisionRecord, ReplyTimings, ToolCall, ToolCallRecord,
         ToolCallTiming,
     },
@@ -105,6 +105,14 @@ struct ToolFollowupPlan {
     final_answer: String,
     #[serde(default)]
     tool_calls: Vec<PlannedToolCall>,
+    #[serde(default)]
+    rationale: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ToolArgRefinement {
+    #[serde(default)]
+    args: Value,
     #[serde(default)]
     rationale: String,
 }
@@ -216,6 +224,8 @@ impl DefaultChatOrchestrator {
             };
             self.execute_planned_tool_calls(
                 &ctx,
+                &ctx.content,
+                &memory_context,
                 pending_tool_calls,
                 planner_source,
                 &mut executed_tool_calls,
@@ -574,6 +584,8 @@ impl DefaultChatOrchestrator {
     async fn execute_planned_tool_calls(
         &self,
         ctx: &MessageCtx,
+        user_input: &str,
+        memory_context: &MemoryContext,
         planned_tool_calls: Vec<ToolCall>,
         source: &'static str,
         executed_tool_calls: &mut Vec<ToolCall>,
@@ -584,7 +596,18 @@ impl DefaultChatOrchestrator {
         for tool_call in planned_tool_calls {
             let tool_started_at = Instant::now();
             let tool_name = tool_call.tool_name;
-            let args = tool_call.args.clone();
+            let planned_args = tool_call.args.clone();
+            let args = self
+                .refine_selected_tool_args(
+                    ctx,
+                    user_input,
+                    memory_context,
+                    source,
+                    &tool_name,
+                    &planned_args,
+                    tool_outputs,
+                )
+                .await;
             executed_tool_calls.push(ToolCall {
                 tool_name: tool_name.clone(),
                 args: args.clone(),
@@ -595,6 +618,7 @@ impl DefaultChatOrchestrator {
                 channel_id = %ctx.channel_id,
                 planner_source = source,
                 tool_name = %tool_name,
+                planned_args_json = %planned_args,
                 args_json = %args,
                 "tool call selected by unified planner"
             );
@@ -684,6 +708,99 @@ impl DefaultChatOrchestrator {
                 text: tool_result.text,
             });
         }
+    }
+
+    async fn refine_selected_tool_args(
+        &self,
+        ctx: &MessageCtx,
+        user_input: &str,
+        memory_context: &MemoryContext,
+        source: &'static str,
+        tool_name: &str,
+        planned_args: &Value,
+        tool_outputs: &[ExecutedToolOutput],
+    ) -> Value {
+        let Some(skill) = get_tool_skill(tool_name) else {
+            return planned_args.clone();
+        };
+
+        let refinement_prompt = build_tool_arg_refinement_prompt(
+            tool_name,
+            skill.markdown,
+            memory_context,
+            tool_outputs,
+        );
+        let refinement_result = self
+            .model
+            .complete(ModelRequest {
+                system_prompt: refinement_prompt,
+                user_prompt: format!(
+                    "User request:\n{}\n\nSelected tool:\n{}\n\nPlanned args JSON:\n{}",
+                    user_input, tool_name, planned_args
+                ),
+            })
+            .await;
+
+        let refinement_result = match refinement_result {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    user_id = %ctx.user_id,
+                    planner_source = source,
+                    tool_name,
+                    "tool arg refinement model call failed; using planned args"
+                );
+                return planned_args.clone();
+            }
+        };
+
+        let refinement_plan = match parse_tool_arg_refinement(&refinement_result) {
+            Ok(plan) => plan,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    refinement_output = %truncate_for_log(&refinement_result, 220),
+                    user_id = %ctx.user_id,
+                    planner_source = source,
+                    tool_name,
+                    "tool arg refinement output parse failed; using planned args"
+                );
+                return planned_args.clone();
+            }
+        };
+
+        let Some(refined_args) = sanitize_single_tool_call_args(tool_name, refinement_plan.args)
+        else {
+            warn!(
+                user_id = %ctx.user_id,
+                planner_source = source,
+                tool_name,
+                "tool arg refinement produced invalid args; using planned args"
+            );
+            return planned_args.clone();
+        };
+
+        let args_changed = refined_args != *planned_args;
+        if args_changed {
+            info!(
+                user_id = %ctx.user_id,
+                planner_source = source,
+                tool_name,
+                rationale = %refinement_plan.rationale,
+                "tool args refined by tool skill"
+            );
+        } else {
+            debug!(
+                user_id = %ctx.user_id,
+                planner_source = source,
+                tool_name,
+                rationale = %refinement_plan.rationale,
+                "tool arg refinement kept planned args"
+            );
+        }
+
+        refined_args
     }
 
     async fn record_tool_call(&self, call: ToolCallRecord) {
@@ -890,6 +1007,41 @@ Tool inventory:
     )
 }
 
+fn build_tool_arg_refinement_prompt(
+    tool_name: &str,
+    tool_skill_markdown: &str,
+    memory: &MemoryContext,
+    tool_outputs: &[ExecutedToolOutput],
+) -> String {
+    let context_block = build_planner_context_block(memory);
+    let previous_outputs_block = if tool_outputs.is_empty() {
+        "No prior tool outputs in this request yet.".to_owned()
+    } else {
+        format!("Prior tool outputs:\n{}", format_tool_outputs(tool_outputs))
+    };
+
+    format!(
+        "You are the tool argument refiner for CompanionPilot.
+The tool is pre-selected and cannot be changed.
+Return strict JSON only (no markdown, no prose) with this schema:
+{{
+  \"args\": {},
+  \"rationale\": \"kept planned args unchanged\"
+}}
+Rules:
+- Keep tool_name fixed to \"{}\".
+- Use the Tool Skill details to produce valid and minimal args for this tool.
+- If planned args are already valid, return them unchanged.
+- Never output tool calls; only output the refined args object.
+- Never emit markdown/code fences.
+Tool Skill:
+{}
+{}
+{}",
+        "{}", tool_name, tool_skill_markdown, context_block, previous_outputs_block
+    )
+}
+
 fn build_planner_context_block(memory: &crate::types::MemoryContext) -> String {
     let mut context_lines = Vec::new();
     if let Some(summary) = &memory.summary {
@@ -968,83 +1120,97 @@ fn parse_tool_followup_plan(raw: &str) -> Result<ToolFollowupPlan, serde_json::E
     parse_json_plan(raw)
 }
 
+fn parse_tool_arg_refinement(raw: &str) -> Result<ToolArgRefinement, serde_json::Error> {
+    parse_json_plan(raw)
+}
+
 fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolCall> {
-    let mut sanitized_calls = Vec::new();
+    planned_calls
+        .into_iter()
+        .filter_map(sanitize_planned_tool_call)
+        .collect()
+}
 
-    for planned_call in planned_calls {
-        match planned_call.tool_name.as_str() {
-            "current_datetime" => {
-                sanitized_calls.push(ToolCall {
-                    tool_name: "current_datetime".to_owned(),
-                    args: json!({}),
-                });
-            }
-            "cli" => {
-                if let Some(args) = sanitize_cli_invocation_args(&planned_call.args) {
-                    sanitized_calls.push(ToolCall {
-                        tool_name: "cli".to_owned(),
-                        args,
-                    });
-                } else {
-                    debug!("dropping planner cli call with invalid args");
-                }
-            }
-            "web_search" => {
-                let query = planned_call
-                    .args
-                    .get("query")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .unwrap_or("");
-                if query.is_empty() {
-                    debug!("dropping planner web_search call with empty query");
-                    continue;
-                }
+fn sanitize_single_tool_call_args(tool_name: &str, args: Value) -> Option<Value> {
+    let sanitized_call = sanitize_planned_tool_call(PlannedToolCall {
+        tool_name: tool_name.to_owned(),
+        args,
+    })?;
+    if sanitized_call.tool_name != tool_name {
+        return None;
+    }
+    Some(sanitized_call.args)
+}
 
-                let max_results = planned_call
-                    .args
-                    .get("max_results")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(5)
-                    .clamp(1, 10);
-
-                sanitized_calls.push(ToolCall {
-                    tool_name: "web_search".to_owned(),
-                    args: json!({
-                        "query": query,
-                        "max_results": max_results
-                    }),
-                });
-            }
-            "discord_voice_join" => {
-                let channel_id = planned_call
-                    .args
-                    .get("channel_id")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                let args = match channel_id {
-                    Some(channel_id) => json!({ "channel_id": channel_id }),
-                    None => json!({}),
-                };
-                sanitized_calls.push(ToolCall {
-                    tool_name: "discord_voice_join".to_owned(),
+fn sanitize_planned_tool_call(planned_call: PlannedToolCall) -> Option<ToolCall> {
+    match planned_call.tool_name.as_str() {
+        "current_datetime" => Some(ToolCall {
+            tool_name: "current_datetime".to_owned(),
+            args: json!({}),
+        }),
+        "cli" => {
+            if let Some(args) = sanitize_cli_invocation_args(&planned_call.args) {
+                Some(ToolCall {
+                    tool_name: "cli".to_owned(),
                     args,
-                });
-            }
-            "discord_voice_leave" => {
-                sanitized_calls.push(ToolCall {
-                    tool_name: "discord_voice_leave".to_owned(),
-                    args: json!({}),
-                });
-            }
-            other => {
-                debug!(tool_name = other, "dropping unknown planner tool call");
+                })
+            } else {
+                debug!("dropping planner cli call with invalid args");
+                None
             }
         }
-    }
+        "web_search" => {
+            let query = planned_call
+                .args
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            if query.is_empty() {
+                debug!("dropping planner web_search call with empty query");
+                return None;
+            }
 
-    sanitized_calls
+            let max_results = planned_call
+                .args
+                .get("max_results")
+                .and_then(Value::as_u64)
+                .unwrap_or(5)
+                .clamp(1, 10);
+
+            Some(ToolCall {
+                tool_name: "web_search".to_owned(),
+                args: json!({
+                    "query": query,
+                    "max_results": max_results
+                }),
+            })
+        }
+        "discord_voice_join" => {
+            let channel_id = planned_call
+                .args
+                .get("channel_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let args = match channel_id {
+                Some(channel_id) => json!({ "channel_id": channel_id }),
+                None => json!({}),
+            };
+            Some(ToolCall {
+                tool_name: "discord_voice_join".to_owned(),
+                args,
+            })
+        }
+        "discord_voice_leave" => Some(ToolCall {
+            tool_name: "discord_voice_leave".to_owned(),
+            args: json!({}),
+        }),
+        other => {
+            debug!(tool_name = other, "dropping unknown planner tool call");
+            None
+        }
+    }
 }
 
 fn enforce_datetime_planning_boundary(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
@@ -1353,7 +1519,7 @@ mod tests {
     use super::{
         DefaultChatOrchestrator, PlannedToolCall, clean_memory_value,
         enforce_datetime_planning_boundary, parse_unified_plan, sanitize_memory_key,
-        sanitize_planned_tool_calls, truncate_for_log,
+        sanitize_planned_tool_calls, sanitize_single_tool_call_args, truncate_for_log,
     };
 
     #[derive(Debug, Default)]
@@ -1420,6 +1586,123 @@ mod tests {
                     })
                     .to_string());
                 }
+            }
+
+            Ok("fallback final synthesis".to_owned())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RefinementSuccessModelProvider;
+
+    #[async_trait]
+    impl ModelProvider for RefinementSuccessModelProvider {
+        async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+            if request
+                .system_prompt
+                .contains("You are the unified planner for CompanionPilot.")
+            {
+                return Ok(json!({
+                    "tool_calls": [
+                        {
+                            "tool_name": "web_search",
+                            "args": {
+                                "query": "alpha",
+                                "max_results": 3
+                            }
+                        }
+                    ],
+                    "memory": {
+                        "store": false,
+                        "key": "",
+                        "value": "",
+                        "confidence": 0.0
+                    },
+                    "rationale": "initial tool choice"
+                })
+                .to_string());
+            }
+
+            if request
+                .system_prompt
+                .contains("You are the tool argument refiner for CompanionPilot.")
+            {
+                return Ok(json!({
+                    "args": {
+                        "query": "beta",
+                        "max_results": 2
+                    },
+                    "rationale": "more specific query"
+                })
+                .to_string());
+            }
+
+            if request
+                .system_prompt
+                .contains("You are the tool follow-up planner for CompanionPilot.")
+            {
+                return Ok(json!({
+                    "action": "final",
+                    "final_answer": "done",
+                    "tool_calls": [],
+                    "rationale": "enough evidence"
+                })
+                .to_string());
+            }
+
+            Ok("fallback final synthesis".to_owned())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RefinementInvalidModelProvider;
+
+    #[async_trait]
+    impl ModelProvider for RefinementInvalidModelProvider {
+        async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+            if request
+                .system_prompt
+                .contains("You are the unified planner for CompanionPilot.")
+            {
+                return Ok(json!({
+                    "tool_calls": [
+                        {
+                            "tool_name": "web_search",
+                            "args": {
+                                "query": "alpha",
+                                "max_results": 3
+                            }
+                        }
+                    ],
+                    "memory": {
+                        "store": false,
+                        "key": "",
+                        "value": "",
+                        "confidence": 0.0
+                    },
+                    "rationale": "initial tool choice"
+                })
+                .to_string());
+            }
+
+            if request
+                .system_prompt
+                .contains("You are the tool argument refiner for CompanionPilot.")
+            {
+                return Ok("not-json".to_owned());
+            }
+
+            if request
+                .system_prompt
+                .contains("You are the tool follow-up planner for CompanionPilot.")
+            {
+                return Ok(json!({
+                    "action": "final",
+                    "final_answer": "done",
+                    "tool_calls": [],
+                    "rationale": "enough evidence"
+                })
+                .to_string());
             }
 
             Ok("fallback final synthesis".to_owned())
@@ -1565,6 +1848,64 @@ mod tests {
         assert_eq!(result.tool_calls[1].args["query"], "beta");
         assert_eq!(result.text, "Final answer from follow-up planner.");
         assert_eq!(result.citations.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tool_arg_refinement_can_update_args_before_execution() {
+        let memory = Arc::new(InMemoryMemoryStore::default());
+        let orchestrator = DefaultChatOrchestrator::new(
+            Arc::new(RefinementSuccessModelProvider),
+            memory,
+            Arc::new(StubWebSearchToolExecutor),
+            SafetyPolicy::default(),
+        );
+
+        let result = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "3c".into(),
+                user_id: "u3c".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "search the web for a better query".into(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("refined tool call should complete");
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "web_search");
+        assert_eq!(result.tool_calls[0].args["query"], "beta");
+        assert_eq!(result.tool_calls[0].args["max_results"], 2);
+        assert_eq!(result.text, "done");
+    }
+
+    #[tokio::test]
+    async fn tool_arg_refinement_failure_falls_back_to_planned_args() {
+        let memory = Arc::new(InMemoryMemoryStore::default());
+        let orchestrator = DefaultChatOrchestrator::new(
+            Arc::new(RefinementInvalidModelProvider),
+            memory,
+            Arc::new(StubWebSearchToolExecutor),
+            SafetyPolicy::default(),
+        );
+
+        let result = orchestrator
+            .handle_message(MessageCtx {
+                message_id: "3d".into(),
+                user_id: "u3d".into(),
+                guild_id: "g1".into(),
+                channel_id: "c1".into(),
+                content: "search the web with fallback".into(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("fallback to planned args should complete");
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "web_search");
+        assert_eq!(result.tool_calls[0].args["query"], "alpha");
+        assert_eq!(result.tool_calls[0].args["max_results"], 3);
+        assert_eq!(result.text, "done");
     }
 
     #[tokio::test]
@@ -1741,6 +2082,40 @@ mod tests {
 
         let sanitized = sanitize_planned_tool_calls(planned_calls);
         assert!(sanitized.is_empty());
+    }
+
+    #[test]
+    fn sanitize_single_tool_call_args_accepts_valid_web_search() {
+        let sanitized = sanitize_single_tool_call_args(
+            "web_search",
+            json!({
+                "query": "rust async traits",
+                "max_results": 4
+            }),
+        )
+        .expect("valid web_search args should pass");
+
+        assert_eq!(sanitized["query"], "rust async traits");
+        assert_eq!(sanitized["max_results"], 4);
+    }
+
+    #[test]
+    fn sanitize_single_tool_call_args_rejects_invalid_web_search() {
+        let sanitized = sanitize_single_tool_call_args(
+            "web_search",
+            json!({
+                "query": "   ",
+                "max_results": 4
+            }),
+        );
+        assert!(sanitized.is_none());
+    }
+
+    #[test]
+    fn sanitize_single_tool_call_args_normalizes_cli_command() {
+        let sanitized = sanitize_single_tool_call_args("cli", json!({"command": "spogo -h"}))
+            .expect("cli command should be normalized");
+        assert_eq!(sanitized, json!({ "args": ["spogo", "-h"] }));
     }
 
     #[test]

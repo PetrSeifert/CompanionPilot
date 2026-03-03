@@ -1,4 +1,5 @@
 mod current_datetime;
+mod skill_catalog;
 mod spogo_cli;
 mod spogo_cli_tool;
 mod web_search;
@@ -11,6 +12,7 @@ use serde_json::Value;
 use crate::{types::MessageCtx, voice::VoiceManager};
 
 pub use current_datetime::CurrentDateTimeTool;
+pub(crate) use skill_catalog::get_tool_skill;
 pub use spogo_cli::{DEFAULT_SPOGO_BIN_PATH, DEFAULT_SPOGO_TIMEOUT_MS, SpogoCli};
 pub use spogo_cli_tool::CliTool;
 pub(crate) use spogo_cli_tool::sanitize_cli_invocation_args;
