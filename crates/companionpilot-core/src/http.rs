@@ -11,6 +11,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tower_http::trace::TraceLayer;
 
 use crate::{
@@ -146,7 +147,7 @@ fn authorization_matches_expected_token(
     };
 
     if let Some(token) = value.strip_prefix("Bearer ") {
-        return token == expected_token;
+        return constant_time_str_eq(token, expected_token);
     }
 
     let Some(encoded_credentials) = value.strip_prefix("Basic ") else {
@@ -164,7 +165,16 @@ fn authorization_matches_expected_token(
     };
 
     // Accept token as either username or password to work with common browser credential prompts.
-    username == expected_token || password == expected_token
+    constant_time_str_eq(username, expected_token) || constant_time_str_eq(password, expected_token)
+}
+
+fn constant_time_str_eq(candidate: &str, expected: &str) -> bool {
+    let candidate_bytes = candidate.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    if candidate_bytes.len() != expected_bytes.len() {
+        return false;
+    }
+    candidate_bytes.ct_eq(expected_bytes).into()
 }
 
 fn unauthorized_response() -> Response {
