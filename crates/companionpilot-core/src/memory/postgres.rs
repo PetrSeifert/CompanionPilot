@@ -124,17 +124,17 @@ impl MemoryStore for PostgresMemoryStore {
         query: &str,
         k: usize,
     ) -> anyhow::Result<Vec<MemoryFact>> {
-        let query = format!("%{}%", query.to_lowercase());
+        let query = format!("%{}%", escape_like_pattern(&query.to_lowercase()));
         let limit = k as i64;
 
         let facts =
             sqlx::query_as::<_, (String, String, f32, String, chrono::DateTime<chrono::Utc>)>(
                 "SELECT key, value, confidence, source, updated_at
-             FROM memory_facts
-             WHERE user_id = $1
-               AND (LOWER(key) LIKE $2 OR LOWER(value) LIKE $2)
-             ORDER BY updated_at DESC
-             LIMIT $3",
+              FROM memory_facts
+              WHERE user_id = $1
+               AND (LOWER(key) LIKE $2 ESCAPE '!' OR LOWER(value) LIKE $2 ESCAPE '!')
+              ORDER BY updated_at DESC
+              LIMIT $3",
             )
             .bind(user_id)
             .bind(query)
@@ -669,4 +669,28 @@ fn u64_to_i64_saturated(value: u64) -> i64 {
 
 fn i64_to_u64_saturated(value: i64) -> u64 {
     if value <= 0 { 0 } else { value as u64 }
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '!' | '%' | '_' => {
+                escaped.push('!');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_like_pattern;
+
+    #[test]
+    fn escape_like_pattern_escapes_wildcards() {
+        assert_eq!(escape_like_pattern("a_b%!!"), "a!_b!%!!!!");
+    }
 }
