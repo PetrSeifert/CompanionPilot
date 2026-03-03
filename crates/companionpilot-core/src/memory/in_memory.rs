@@ -306,7 +306,9 @@ impl MemoryStore for InMemoryMemoryStore {
         let mut decisions = self.planner_decisions.write().await;
         let entries = decisions.entry(user_id).or_default();
         entries.push(decision);
-        prune_oldest_by(entries, MAX_PLANNER_DECISIONS_PER_USER, |entry| entry.timestamp);
+        prune_oldest_by(entries, MAX_PLANNER_DECISIONS_PER_USER, |entry| {
+            entry.timestamp
+        });
         Ok(())
     }
 
@@ -347,7 +349,9 @@ impl MemoryStore for InMemoryMemoryStore {
         } else {
             entries.push(latency);
         }
-        prune_oldest_by(entries, MAX_MESSAGE_LATENCIES_PER_USER, |entry| entry.timestamp);
+        prune_oldest_by(entries, MAX_MESSAGE_LATENCIES_PER_USER, |entry| {
+            entry.timestamp
+        });
         Ok(())
     }
 

@@ -32,10 +32,6 @@ use crate::{
 
 const DEFAULT_LISTEN_WINDOW_MS: u64 = 12_000;
 const DEFAULT_CHUNK_GAP_MS: u64 = 700;
-const MIN_LISTEN_WINDOW_MS: u64 = 1_000;
-const MAX_LISTEN_WINDOW_MS: u64 = 60_000;
-const MIN_CHUNK_GAP_MS: u64 = 100;
-const MAX_CHUNK_GAP_MS: u64 = 3_000;
 const MAX_TTS_INPUT_CHARS: usize = 4_000;
 
 #[derive(Debug, Clone)]
@@ -433,64 +429,6 @@ impl VoiceManager {
         self.sessions.write().await.remove(&guild_id);
         info!(guild_id, "voice session removed");
         Ok("Left the voice channel.".to_owned())
-    }
-
-    pub async fn listen_and_respond_for_requester(
-        &self,
-        guild_id_raw: &str,
-        requester_user_id_raw: &str,
-        args: &Value,
-    ) -> anyhow::Result<String> {
-        let guild_id = parse_discord_id(guild_id_raw, "guild_id")?;
-        let requester_user_id = parse_discord_id(requester_user_id_raw, "requester_user_id")?;
-        let session = self
-            .sessions
-            .read()
-            .await
-            .get(&guild_id)
-            .cloned()
-            .context("bot is not connected to voice in this guild")?;
-
-        self.ensure_requester_in_channel(guild_id, requester_user_id, session.channel_id)
-            .await?;
-        self.ensure_allowlisted(guild_id, session.channel_id)
-            .await?;
-
-        let runtime_settings = self.runtime_settings.get().await;
-        let listen_window_ms = args
-            .get("listen_window_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(runtime_settings.voice_listen_window_ms)
-            .clamp(MIN_LISTEN_WINDOW_MS, MAX_LISTEN_WINDOW_MS);
-        let chunk_gap_ms = args
-            .get("chunk_gap_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(runtime_settings.voice_chunk_gap_ms)
-            .clamp(MIN_CHUNK_GAP_MS, MAX_CHUNK_GAP_MS);
-        let max_turn_ms = args
-            .get("max_turn_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(runtime_settings.voice_max_turn_ms)
-            .max(chunk_gap_ms);
-
-        let listen_window = Duration::from_millis(listen_window_ms);
-        let chunk_gap = Duration::from_millis(chunk_gap_ms);
-        let max_turn = Duration::from_millis(max_turn_ms);
-
-        let transcript = self
-            .process_voice_turn(
-                guild_id,
-                Arc::clone(&session),
-                listen_window,
-                chunk_gap,
-                max_turn,
-            )
-            .await?;
-
-        let truncated_transcript = truncate_for_tool_result(&transcript, 220);
-        Ok(format!(
-            "Processed voice turn and replied in voice. Transcript: {truncated_transcript}"
-        ))
     }
 
     async fn process_voice_turn(

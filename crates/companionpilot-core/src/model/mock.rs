@@ -59,12 +59,6 @@ impl ModelProvider for MockModelProvider {
                     "args": {}
                 }));
             }
-            if extract_listen_voice_turn(&request.user_prompt) {
-                tool_calls.push(json!({
-                    "tool_name": "discord_voice_listen_turn",
-                    "args": {}
-                }));
-            }
             if extract_leave_voice(&request.user_prompt) {
                 tool_calls.push(json!({
                     "tool_name": "discord_voice_leave",
@@ -159,13 +153,6 @@ fn extract_join_voice(input: &str) -> bool {
     lowered.contains("join voice")
         || lowered.contains("join the voice")
         || lowered.contains("connect to voice")
-}
-
-fn extract_listen_voice_turn(input: &str) -> bool {
-    let lowered = input.to_lowercase();
-    lowered.contains("listen in voice")
-        || lowered.contains("listen now in voice")
-        || lowered.contains("voice turn")
 }
 
 fn extract_leave_voice(input: &str) -> bool {

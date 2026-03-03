@@ -952,16 +952,6 @@ fn build_tool_inventory_for_planner() -> &'static str {
     "when_not_to_use": "User did not request voice channel participation."
   },
   {
-    "tool_name": "discord_voice_listen_turn",
-    "args_schema": {
-      "listen_window_ms": "integer 1000-60000 (optional, default 12000)",
-      "chunk_gap_ms": "integer 100-3000 (optional, default 700)",
-      "max_turn_ms": "integer >= chunk_gap_ms (optional, default 12000)"
-    },
-    "when_to_use": "Bot is already in voice and user requests a listen/respond voice turn.",
-    "when_not_to_use": "Bot is not in voice or user requested text-only response."
-  },
-  {
     "tool_name": "discord_voice_leave",
     "args_schema": {},
     "when_to_use": "User explicitly asks assistant to leave voice or stop voice interaction.",
@@ -1040,35 +1030,6 @@ fn sanitize_planned_tool_calls(planned_calls: Vec<PlannedToolCall>) -> Vec<ToolC
                 sanitized_calls.push(ToolCall {
                     tool_name: "discord_voice_join".to_owned(),
                     args,
-                });
-            }
-            "discord_voice_listen_turn" => {
-                let listen_window_ms = planned_call
-                    .args
-                    .get("listen_window_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(12_000)
-                    .clamp(1_000, 60_000);
-                let chunk_gap_ms = planned_call
-                    .args
-                    .get("chunk_gap_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(700)
-                    .clamp(100, 3_000);
-                let max_turn_ms = planned_call
-                    .args
-                    .get("max_turn_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(12_000)
-                    .max(chunk_gap_ms);
-
-                sanitized_calls.push(ToolCall {
-                    tool_name: "discord_voice_listen_turn".to_owned(),
-                    args: json!({
-                        "listen_window_ms": listen_window_ms,
-                        "chunk_gap_ms": chunk_gap_ms,
-                        "max_turn_ms": max_turn_ms
-                    }),
                 });
             }
             "discord_voice_leave" => {
@@ -1816,25 +1777,16 @@ mod tests {
                 args: json!({"channel_id":"123"}),
             },
             PlannedToolCall {
-                tool_name: "discord_voice_listen_turn".to_owned(),
-                args: json!({
-                    "listen_window_ms": 15000,
-                    "chunk_gap_ms": 600,
-                    "max_turn_ms": 20000
-                }),
-            },
-            PlannedToolCall {
                 tool_name: "discord_voice_leave".to_owned(),
                 args: json!({}),
             },
         ];
 
         let sanitized = sanitize_planned_tool_calls(planned_calls);
-        assert_eq!(sanitized.len(), 3);
+        assert_eq!(sanitized.len(), 2);
         assert_eq!(sanitized[0].tool_name, "discord_voice_join");
         assert_eq!(sanitized[0].args["channel_id"], "123");
-        assert_eq!(sanitized[1].tool_name, "discord_voice_listen_turn");
-        assert_eq!(sanitized[2].tool_name, "discord_voice_leave");
+        assert_eq!(sanitized[1].tool_name, "discord_voice_leave");
     }
 
     #[test]

@@ -71,23 +71,6 @@ impl ToolExecutor for ToolRegistry {
                     citations: Vec::new(),
                 })
             }
-            "discord_voice_listen_turn" => {
-                let manager = self
-                    .voice
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("voice tools are not configured"))?;
-                let text = manager
-                    .listen_and_respond_for_requester(
-                        &message_ctx.guild_id,
-                        &message_ctx.user_id,
-                        &args,
-                    )
-                    .await?;
-                Ok(ToolResult {
-                    text,
-                    citations: Vec::new(),
-                })
-            }
             "discord_voice_leave" => {
                 let manager = self
                     .voice

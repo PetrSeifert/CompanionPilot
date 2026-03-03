@@ -82,7 +82,7 @@ curl -X POST http://localhost:8080/chat \
 - Web search is used when the planner determines external facts are required.
 - Memory storage is model-driven (no memory command prefix required); corrections can overwrite prior facts.
 - Short-term memory is injected from recent channel turns, even when no long-term fact is stored.
-- Voice mode is optional and tool-call driven: configure `VOICE_ENABLED=true`, `VOICE_ALLOWLIST`, and `OPENAI_API_KEY` to allow AI-planned `discord_voice_join`, `discord_voice_listen_turn`, and `discord_voice_leave`.
+- Voice mode is optional and tool-call driven: configure `VOICE_ENABLED=true`, `VOICE_ALLOWLIST`, and `OPENAI_API_KEY` to allow AI-planned `discord_voice_join` and `discord_voice_leave`.
 - After `discord_voice_join`, CompanionPilot now listens continuously for natural voice turns (no text trigger required), runs STT, and replies in voice with TTS while persisting transcript/reply to memory/dashboard.
 
 ## Spogo setup (Spotify CLI)
