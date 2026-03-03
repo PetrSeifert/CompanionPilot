@@ -16,6 +16,8 @@ use tracing::{error, info, warn};
 
 use crate::{orchestrator::DefaultChatOrchestrator, types::MessageCtx, voice::VoiceManager};
 
+const DISCORD_MESSAGE_MAX_CHARS: usize = 2_000;
+
 struct Handler {
     orchestrator: Arc<DefaultChatOrchestrator>,
     voice: Option<Arc<VoiceManager>>,
@@ -118,8 +120,15 @@ impl EventHandler for Handler {
                     return;
                 }
 
-                if let Err(error) = msg.channel_id.say(&ctx.http, reply.text).await {
-                    error!(?error, "failed to send Discord message");
+                for (chunk_index, chunk) in
+                    split_message_for_discord(&reply.text, DISCORD_MESSAGE_MAX_CHARS)
+                        .into_iter()
+                        .enumerate()
+                {
+                    if let Err(error) = msg.channel_id.say(&ctx.http, chunk).await {
+                        error!(?error, chunk_index, "failed to send Discord message chunk");
+                        break;
+                    }
                 }
             }
             Err(error) => {
@@ -180,4 +189,52 @@ pub async fn start_discord_bot(
     info!("starting Discord gateway client");
     client.start().await?;
     Ok(())
+}
+
+fn split_message_for_discord(text: &str, max_chars: usize) -> Vec<&str> {
+    if text.is_empty() || max_chars == 0 {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut chars_in_chunk = 0usize;
+
+    for (byte_index, _) in text.char_indices() {
+        if chars_in_chunk == max_chars {
+            chunks.push(&text[start..byte_index]);
+            start = byte_index;
+            chars_in_chunk = 0;
+        }
+        chars_in_chunk += 1;
+    }
+
+    if start < text.len() {
+        chunks.push(&text[start..]);
+    }
+
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DISCORD_MESSAGE_MAX_CHARS, split_message_for_discord};
+
+    #[test]
+    fn split_message_for_discord_enforces_limit() {
+        let text = "a".repeat(DISCORD_MESSAGE_MAX_CHARS + 25);
+        let chunks = split_message_for_discord(&text, DISCORD_MESSAGE_MAX_CHARS);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].chars().count(), DISCORD_MESSAGE_MAX_CHARS);
+        assert_eq!(chunks[1].chars().count(), 25);
+    }
+
+    #[test]
+    fn split_message_for_discord_handles_multibyte_text() {
+        let text = "😄".repeat(DISCORD_MESSAGE_MAX_CHARS + 1);
+        let chunks = split_message_for_discord(&text, DISCORD_MESSAGE_MAX_CHARS);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].chars().count(), DISCORD_MESSAGE_MAX_CHARS);
+        assert_eq!(chunks[1].chars().count(), 1);
+    }
 }
