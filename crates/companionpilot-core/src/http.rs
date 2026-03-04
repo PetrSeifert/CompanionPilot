@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use axum::{
     Json, Router,
@@ -22,6 +25,7 @@ use crate::{
 };
 
 const BASIC_AUTH_CHALLENGE: &str = r#"Basic realm="CompanionPilot", charset="UTF-8""#;
+static HTTP_MESSAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 static DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
@@ -214,7 +218,7 @@ async fn chat(
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<OrchestratorReply>, (axum::http::StatusCode, String)> {
     let message = MessageCtx {
-        message_id: format!("http-{}", Utc::now().timestamp_millis()),
+        message_id: next_http_message_id(),
         user_id: request.user_id,
         guild_id: request.guild_id,
         channel_id: request.channel_id,
@@ -405,6 +409,12 @@ async fn api_clear_message_latencies(
     Ok(Json(DeletedResponse { deleted }))
 }
 
+fn next_http_message_id() -> String {
+    let timestamp_ms = Utc::now().timestamp_millis();
+    let seq = HTTP_MESSAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("http-{timestamp_ms}-{seq}")
+}
+
 fn internal_error(error: anyhow::Error) -> (axum::http::StatusCode, String) {
     (
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -468,5 +478,14 @@ mod tests {
         ));
 
         assert!(!authorization_matches_expected_token(None, expected));
+    }
+
+    #[test]
+    fn next_http_message_id_is_unique() {
+        let first = next_http_message_id();
+        let second = next_http_message_id();
+        assert_ne!(first, second);
+        assert!(first.starts_with("http-"));
+        assert!(second.starts_with("http-"));
     }
 }
