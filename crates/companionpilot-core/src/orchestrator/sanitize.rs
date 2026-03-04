@@ -12,6 +12,7 @@ use crate::{
 pub(super) struct SanitizedToolCall {
     pub(super) call_id: String,
     pub(super) call: ToolCall,
+    pub(super) reasoning: Option<String>,
 }
 
 pub(super) fn sanitize_native_tool_calls(raw_calls: Vec<ModelToolCall>) -> Vec<SanitizedToolCall> {
@@ -22,6 +23,14 @@ pub(super) fn sanitize_native_tool_calls(raw_calls: Vec<ModelToolCall>) -> Vec<S
 }
 
 fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCall> {
+    let reasoning = raw_call
+        .arguments
+        .get("reasoning")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+
     let call = match raw_call.name.as_str() {
         "current_datetime" => ToolCall {
             tool_name: "current_datetime".to_owned(),
@@ -124,6 +133,7 @@ fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCal
     Some(SanitizedToolCall {
         call_id: raw_call.id,
         call,
+        reasoning,
     })
 }
 

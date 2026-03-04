@@ -9,7 +9,13 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
             description: "Get current UTC date/time for time-sensitive answers.".to_owned(),
             parameters: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
+                },
+                "required": ["reasoning"],
                 "additionalProperties": false
             }),
         },
@@ -32,8 +38,13 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
                                 "minLength": 1
                             }
                         ]
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
                     }
                 },
+                "required": ["reasoning"],
                 // Restrict keys to command/args so provider models don't invent unsupported fields.
                 "anyOf": [
                     { "required": ["command"] },
@@ -49,9 +60,13 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "max_results": { "type": "integer", "minimum": 1, "maximum": 10 }
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 10 },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
                 },
-                "required": ["query"],
+                "required": ["query", "reasoning"],
                 "additionalProperties": false
             }),
         },
@@ -61,8 +76,13 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "channel_id": { "type": "string" }
+                    "channel_id": { "type": "string" },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
                 },
+                "required": ["reasoning"],
                 "additionalProperties": false
             }),
         },
@@ -71,7 +91,13 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
             description: "Leave Discord voice channel.".to_owned(),
             parameters: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
+                },
+                "required": ["reasoning"],
                 "additionalProperties": false
             }),
         },
@@ -83,9 +109,13 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
                 "properties": {
                     "key": { "type": "string" },
                     "value": { "type": "string" },
-                    "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+                    "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
                 },
-                "required": ["key", "value"],
+                "required": ["key", "value", "reasoning"],
                 "additionalProperties": false
             }),
         },

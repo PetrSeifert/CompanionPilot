@@ -188,11 +188,22 @@ impl DefaultChatOrchestrator {
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
                 .map(ToOwned::to_owned);
-            let reasoning_text = assistant_reasoning
-                .clone()
-                .unwrap_or_else(|| assistant_text.clone());
             let raw_tool_calls = turn_result.tool_calls.clone();
             let planned_tool_calls = sanitize_native_tool_calls(turn_result.tool_calls);
+            let tool_reasoning_summary = planned_tool_calls
+                .iter()
+                .filter_map(|call| call.reasoning.as_deref())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let reasoning_text = assistant_reasoning.clone().unwrap_or_else(|| {
+                if !tool_reasoning_summary.is_empty() {
+                    tool_reasoning_summary.clone()
+                } else {
+                    assistant_text.clone()
+                }
+            });
             conversation_messages.push(ModelMessage {
                 role: ModelMessageRole::Assistant,
                 content: assistant_text.clone(),
@@ -288,6 +299,7 @@ impl DefaultChatOrchestrator {
                                 "id": call.call_id,
                                 "tool_name": call.call.tool_name,
                                 "args": call.call.args,
+                                "reasoning": call.reasoning,
                             }))
                             .collect::<Vec<_>>()
                     }),

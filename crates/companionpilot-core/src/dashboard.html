@@ -880,6 +880,22 @@ body::before {
   word-break: break-word;
 }
 
+.reply-detail-tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.reply-detail-tool-reason {
+  display: block;
+}
+
+.reply-detail-tool-reason.reply-detail-reason-text,
+.reply-detail-tool-reason.reply-detail-reason {
+  font-size: 0.65rem;
+}
+
 .reply-detail-reason {
   color: var(--text-faint);
   min-width: 0;
@@ -1852,17 +1868,47 @@ pre.json-block {
     }
   }
 
-  function extractAssistantReasoningFromPayload(payload) {
+  function extractDecisionPayload(payload) {
     const parsedPayload = typeof payload === 'string'
       ? parseJsonSafely(payload)
       : payload;
-    if (!parsedPayload || typeof parsedPayload !== 'object') return '';
+    if (!parsedPayload || typeof parsedPayload !== 'object') return null;
     const decisionPayload = parsedPayload.decision
       && typeof parsedPayload.decision === 'object'
       ? parsedPayload.decision
       : parsedPayload;
-    const reasoning = decisionPayload.assistant_reasoning || decisionPayload.assistant_text_preview;
-    return typeof reasoning === 'string' ? reasoning.trim() : '';
+    return decisionPayload && typeof decisionPayload === 'object'
+      ? decisionPayload
+      : null;
+  }
+
+  function extractToolCallReasoningEntries(payload) {
+    const decisionPayload = extractDecisionPayload(payload);
+    if (!decisionPayload || !Array.isArray(decisionPayload.tool_calls)) return [];
+    return decisionPayload.tool_calls
+      .filter(call => call && typeof call === 'object')
+      .map(call => ({
+        id: typeof call.id === 'string' ? call.id : '',
+        tool_name: typeof call.tool_name === 'string' ? call.tool_name : '',
+        reasoning: typeof call.reasoning === 'string' ? call.reasoning.trim() : ''
+      }))
+      .filter(call => call.reasoning.length > 0);
+  }
+
+  function extractAssistantReasoningFromPayload(payload) {
+    const decisionPayload = extractDecisionPayload(payload);
+    if (!decisionPayload) return '';
+    const assistantReasoning = typeof decisionPayload.assistant_reasoning === 'string'
+      ? decisionPayload.assistant_reasoning.trim()
+      : '';
+    if (assistantReasoning) return assistantReasoning;
+    const assistantPreview = typeof decisionPayload.assistant_text_preview === 'string'
+      ? decisionPayload.assistant_text_preview.trim()
+      : '';
+    if (assistantPreview) return assistantPreview;
+    return extractToolCallReasoningEntries(decisionPayload)
+      .map(call => call.reasoning)
+      .join(' | ');
   }
 
   function makeInlineReasonNode(reasoning, previewChars) {
@@ -2241,6 +2287,17 @@ pre.json-block {
             }
           });
 
+          const toolReasoningsByName = new Map();
+          matchedDecisions.forEach(dec => {
+            extractToolCallReasoningEntries(dec.payload_json).forEach(call => {
+              if (!call.tool_name) return;
+              if (!toolReasoningsByName.has(call.tool_name)) {
+                toolReasoningsByName.set(call.tool_name, []);
+              }
+              toolReasoningsByName.get(call.tool_name).push(call.reasoning);
+            });
+          });
+
           matchedTools.forEach(tc => {
             const item = document.createElement('div');
             item.className = 'reply-detail-item';
@@ -2251,11 +2308,26 @@ pre.json-block {
             if (!tc.success) icon.style.borderColor = 'rgba(196, 79, 79, 0.3)';
             if (!tc.success) icon.style.color = 'var(--rose)';
 
+            const body = document.createElement('div');
+            body.className = 'reply-detail-tool-body';
+
             const label = document.createElement('span');
             label.textContent = tc.tool_name + formatDurationSuffix(tc.duration_ms);
+            body.appendChild(label);
+
+            const toolReasoningQueue = toolReasoningsByName.get(tc.tool_name) || [];
+            const toolReasoning = toolReasoningQueue.length > 0
+              ? toolReasoningQueue.shift()
+              : '';
+            if (toolReasoning) {
+              item.style.alignItems = 'flex-start';
+              const reasoningNode = makeInlineReasonNode(toolReasoning, 110);
+              reasoningNode.classList.add('reply-detail-tool-reason');
+              body.appendChild(reasoningNode);
+            }
 
             item.appendChild(icon);
-            item.appendChild(label);
+            item.appendChild(body);
             details.appendChild(item);
           });
 
