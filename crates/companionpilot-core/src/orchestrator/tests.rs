@@ -211,8 +211,8 @@ impl ModelProvider for InvalidToolCallThenFinalModelProvider {
         Ok(ModelTurnResponse {
             assistant_text: String::new(),
             tool_calls: vec![ModelToolCall {
-                id: "bad-cli-call".to_owned(),
-                name: "cli".to_owned(),
+                id: "bad-run-terminal-command-call".to_owned(),
+                name: "run_terminal_command".to_owned(),
                 arguments: json!({ "command": "spogo" }),
             }],
         })

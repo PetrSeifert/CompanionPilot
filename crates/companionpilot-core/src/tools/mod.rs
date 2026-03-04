@@ -50,6 +50,7 @@ impl ToolExecutor for ToolRegistry {
     ) -> anyhow::Result<ToolResult> {
         match tool_name {
             "current_datetime" => self.current_datetime.get_now(args).await,
+            "run_terminal_command" => self.cli.execute_command(args).await,
             "cli" => self.cli.execute_command(args).await,
             "web_search" => {
                 let tool = self

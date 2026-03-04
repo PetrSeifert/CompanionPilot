@@ -7,7 +7,10 @@ tags: [spotify, cli, spogo]
 
 # spogo
 
-Use `spogo` for Spotify playback/search.
+Use `run_terminal_command` for Spotify playback/search by invoking `spogo`.
+Pass either:
+- `command` as a single string (example: `spogo status`)
+- `args` as argv tokens (example: `["spogo","status"]`)
 
 Common CLI commands
 - Search: `spogo search track "query"`

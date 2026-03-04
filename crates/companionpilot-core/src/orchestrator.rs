@@ -229,7 +229,7 @@ impl DefaultChatOrchestrator {
 
                     conversation_messages.push(ModelMessage {
                         role: ModelMessageRole::User,
-                        content: "Previous tool call arguments were invalid and were not executed. Re-issue corrected tool calls or provide a direct final answer. For CLI usage, use command like `spogo status` or args array like [\"spogo\",\"status\"].".to_owned(),
+                        content: "Previous tool call arguments were invalid and were not executed. Re-issue corrected tool calls or provide a direct final answer. For `run_terminal_command`, provide `command` (string) or `args` (array<string> or string).".to_owned(),
                         name: None,
                         tool_call_id: None,
                         tool_calls: Vec::new(),

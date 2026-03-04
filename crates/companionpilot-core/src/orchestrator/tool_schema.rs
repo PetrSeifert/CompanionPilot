@@ -14,8 +14,8 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
             }),
         },
         ModelToolDefinition {
-            name: "cli".to_owned(),
-            description: "Execute local spogo CLI commands for Spotify operations.".to_owned(),
+            name: "run_terminal_command".to_owned(),
+            description: "Run a local terminal command.".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {

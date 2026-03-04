@@ -113,8 +113,8 @@ impl ModelProvider for MockModelProvider {
         }
         if let Some(query) = extract_spotify_query(&user_input) {
             tool_calls.push(tool_call(
-                "call-cli",
-                "cli",
+                "call-run-terminal-command",
+                "run_terminal_command",
                 json!({
                     "command": format!("spogo search track {query}")
                 }),

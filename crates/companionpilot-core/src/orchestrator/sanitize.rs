@@ -27,10 +27,10 @@ fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCal
             tool_name: "current_datetime".to_owned(),
             args: json!({}),
         },
-        "cli" => {
+        "run_terminal_command" | "cli" => {
             let args = sanitize_cli_invocation_args(&raw_call.arguments)?;
             ToolCall {
-                tool_name: "cli".to_owned(),
+                tool_name: "run_terminal_command".to_owned(),
                 args,
             }
         }
