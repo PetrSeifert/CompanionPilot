@@ -445,7 +445,7 @@ fn build_turn_input_snapshot(
     json!({
         "round": round,
         "user_request": truncate_for_log(user_request, 500),
-        "system_prompt_preview": truncate_for_log(system_prompt, 1200),
+        "system_prompt_preview": system_prompt,
         "selected_skill_ids": selected_skill_ids,
         "context": {
             "summary": memory_context.summary,

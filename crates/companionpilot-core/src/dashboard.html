@@ -2483,9 +2483,14 @@ pre.json-block {
         if (inputSnapshot.system_prompt_preview) {
           const promptLabel = document.createElement('div');
           promptLabel.className = 'detail-label';
-          promptLabel.textContent = 'SYSTEM PROMPT PREVIEW';
+          promptLabel.textContent = 'SYSTEM PROMPT';
           inner.appendChild(promptLabel);
-          inner.appendChild(syntaxHighlightJSON(JSON.stringify(inputSnapshot.system_prompt_preview, null, 2)));
+          const promptBlock = document.createElement('pre');
+          promptBlock.className = 'json-block';
+          promptBlock.style.whiteSpace = 'pre-wrap';
+          promptBlock.style.wordBreak = 'break-word';
+          promptBlock.textContent = inputSnapshot.system_prompt_preview;
+          inner.appendChild(promptBlock);
         }
 
         inner.appendChild(syntaxHighlightJSON(JSON.stringify(inputSnapshot, null, 2)));
