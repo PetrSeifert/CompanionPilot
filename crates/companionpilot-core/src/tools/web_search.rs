@@ -28,7 +28,32 @@ impl TavilyWebSearchTool {
             .get("max_results")
             .and_then(Value::as_u64)
             .unwrap_or(5)
-            .clamp(1, 10);
+            .clamp(1, 20);
+
+        let search_depth = args
+            .get("search_depth")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let topic = args
+            .get("topic")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let time_range = args
+            .get("time_range")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+
+        let extract_domains = |key: &str| -> Option<Vec<String>> {
+            let arr = args.get(key)?.as_array()?;
+            let domains: Vec<String> = arr
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect();
+            if domains.is_empty() { None } else { Some(domains) }
+        };
+        let include_domains = extract_domains("include_domains");
+        let exclude_domains = extract_domains("exclude_domains");
 
         info!(max_results, "tavily web search start");
         debug!(query = %query, "tavily query");
@@ -38,6 +63,11 @@ impl TavilyWebSearchTool {
             query,
             max_results: max_results as usize,
             include_answer: true,
+            search_depth,
+            topic,
+            time_range,
+            include_domains,
+            exclude_domains,
         };
 
         let response = self
@@ -76,7 +106,22 @@ impl TavilyWebSearchTool {
 
         for item in response.results {
             citations.push(item.url.clone());
-            lines.push(format!("- {} ({})", item.title, item.url));
+            let mut line = format!("- {} ({})", item.title, item.url);
+            if let Some(content) = item.content {
+                let snippet = if content.len() > 300 {
+                    let boundary = content
+                        .char_indices()
+                        .take_while(|(i, _)| *i < 300)
+                        .last()
+                        .map(|(i, ch)| i + ch.len_utf8())
+                        .unwrap_or(300);
+                    format!("{}...", &content[..boundary])
+                } else {
+                    content
+                };
+                line.push_str(&format!("\n  {snippet}"));
+            }
+            lines.push(line);
         }
 
         if lines.is_empty() {
@@ -96,6 +141,16 @@ struct TavilyRequest<'a> {
     query: &'a str,
     max_results: usize,
     include_answer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_depth: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time_range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include_domains: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclude_domains: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,4 +163,5 @@ struct TavilyResponse {
 struct TavilyResult {
     title: String,
     url: String,
+    content: Option<String>,
 }

@@ -60,7 +60,34 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "max_results": { "type": "integer", "minimum": 1, "maximum": 10 },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 20 },
+                    "search_depth": {
+                        "type": "string",
+                        "enum": ["basic", "advanced"],
+                        "description": "Search depth: 'basic' is fast, 'advanced' is slower but more thorough."
+                    },
+                    "topic": {
+                        "type": "string",
+                        "enum": ["general", "news"],
+                        "description": "Category filter for search results."
+                    },
+                    "time_range": {
+                        "type": "string",
+                        "enum": ["day", "week", "month", "year"],
+                        "description": "Filter results by recency."
+                    },
+                    "include_domains": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": 10,
+                        "description": "Only include results from these domains."
+                    },
+                    "exclude_domains": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": 10,
+                        "description": "Exclude results from these domains."
+                    },
                     "reasoning": {
                         "type": "string",
                         "description": "Brief explanation of why this tool is needed for the user's request."

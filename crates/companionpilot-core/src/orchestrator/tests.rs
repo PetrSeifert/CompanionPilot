@@ -873,3 +873,130 @@ fn truncate_for_log_preserves_utf8_boundaries() {
     let output = truncate_for_log("hello🎵world", 7);
     assert_eq!(output, "hello...");
 }
+
+#[test]
+fn web_search_valid_optional_params_pass_through() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "ws-1".to_owned(),
+        name: "web_search".to_owned(),
+        arguments: json!({
+            "query": "rust async",
+            "max_results": 15,
+            "search_depth": "advanced",
+            "topic": "news",
+            "time_range": "week",
+            "include_domains": ["docs.rs", "crates.io"],
+            "exclude_domains": ["reddit.com"],
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["query"], "rust async");
+    assert_eq!(args["max_results"], 15);
+    assert_eq!(args["search_depth"], "advanced");
+    assert_eq!(args["topic"], "news");
+    assert_eq!(args["time_range"], "week");
+    assert_eq!(args["include_domains"], json!(["docs.rs", "crates.io"]));
+    assert_eq!(args["exclude_domains"], json!(["reddit.com"]));
+}
+
+#[test]
+fn web_search_invalid_enums_are_silently_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "ws-2".to_owned(),
+        name: "web_search".to_owned(),
+        arguments: json!({
+            "query": "test",
+            "search_depth": "ultra-fast",
+            "topic": "finance",
+            "time_range": "century",
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["query"], "test");
+    assert!(args.get("search_depth").is_none());
+    assert!(args.get("topic").is_none());
+    assert!(args.get("time_range").is_none());
+}
+
+#[test]
+fn web_search_domain_lists_filter_empty_and_truncate() {
+    let domains: Vec<&str> = vec!["a.com", "b.com", "c.com", "d.com", "e.com",
+        "f.com", "g.com", "h.com", "i.com", "j.com", "k.com", "l.com"];
+    // 12 items — should be truncated to 10
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "ws-3".to_owned(),
+        name: "web_search".to_owned(),
+        arguments: json!({
+            "query": "test",
+            "include_domains": domains,
+            "exclude_domains": ["", "  ", "valid.com", ""],
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    let include = args["include_domains"].as_array().unwrap();
+    assert_eq!(include.len(), 10);
+    let exclude = args["exclude_domains"].as_array().unwrap();
+    assert_eq!(exclude.len(), 1);
+    assert_eq!(exclude[0], "valid.com");
+}
+
+#[test]
+fn web_search_empty_domain_lists_are_omitted() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "ws-4".to_owned(),
+        name: "web_search".to_owned(),
+        arguments: json!({
+            "query": "test",
+            "include_domains": ["", "  "],
+            "exclude_domains": [],
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert!(args.get("include_domains").is_none());
+    assert!(args.get("exclude_domains").is_none());
+}
+
+#[test]
+fn web_search_backward_compatible_with_only_query_and_max_results() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "ws-5".to_owned(),
+        name: "web_search".to_owned(),
+        arguments: json!({
+            "query": "hello world",
+            "max_results": 3,
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["query"], "hello world");
+    assert_eq!(args["max_results"], 3);
+    assert!(args.get("search_depth").is_none());
+    assert!(args.get("topic").is_none());
+    assert!(args.get("time_range").is_none());
+    assert!(args.get("include_domains").is_none());
+    assert!(args.get("exclude_domains").is_none());
+}
+
+#[test]
+fn web_search_max_results_clamps_to_20() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "ws-6".to_owned(),
+        name: "web_search".to_owned(),
+        arguments: json!({
+            "query": "test",
+            "max_results": 50,
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].call.args["max_results"], 20);
+}

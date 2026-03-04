@@ -62,14 +62,62 @@ fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCal
                 .get("max_results")
                 .and_then(Value::as_u64)
                 .unwrap_or(5)
-                .clamp(1, 10);
+                .clamp(1, 20);
+
+            let mut args = json!({
+                "query": query,
+                "max_results": max_results,
+            });
+
+            if let Some(depth) = raw_call
+                .arguments
+                .get("search_depth")
+                .and_then(Value::as_str)
+            {
+                if matches!(depth, "basic" | "advanced") {
+                    args["search_depth"] = json!(depth);
+                }
+            }
+
+            if let Some(topic) = raw_call.arguments.get("topic").and_then(Value::as_str) {
+                if matches!(topic, "general" | "news") {
+                    args["topic"] = json!(topic);
+                }
+            }
+
+            if let Some(range) = raw_call
+                .arguments
+                .get("time_range")
+                .and_then(Value::as_str)
+            {
+                if matches!(range, "day" | "week" | "month" | "year") {
+                    args["time_range"] = json!(range);
+                }
+            }
+
+            let extract_domain_list = |key: &str| -> Option<Vec<String>> {
+                let arr = raw_call.arguments.get(key)?.as_array()?;
+                let domains: Vec<String> = arr
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .take(10)
+                    .map(ToOwned::to_owned)
+                    .collect();
+                if domains.is_empty() { None } else { Some(domains) }
+            };
+
+            if let Some(domains) = extract_domain_list("include_domains") {
+                args["include_domains"] = json!(domains);
+            }
+            if let Some(domains) = extract_domain_list("exclude_domains") {
+                args["exclude_domains"] = json!(domains);
+            }
 
             ToolCall {
                 tool_name: "web_search".to_owned(),
-                args: json!({
-                    "query": query,
-                    "max_results": max_results,
-                }),
+                args,
             }
         }
         "discord_voice_join" => {
