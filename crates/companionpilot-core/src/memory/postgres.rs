@@ -125,7 +125,7 @@ impl MemoryStore for PostgresMemoryStore {
         k: usize,
     ) -> anyhow::Result<Vec<MemoryFact>> {
         let query = format!("%{}%", escape_like_pattern(&query.to_lowercase()));
-        let limit = k as i64;
+        let limit = usize_to_i64_saturated(k);
 
         let facts =
             sqlx::query_as::<_, (String, String, f32, String, chrono::DateTime<chrono::Utc>)>(
@@ -155,7 +155,7 @@ impl MemoryStore for PostgresMemoryStore {
     }
 
     async fn list_facts(&self, user_id: &str, limit: usize) -> anyhow::Result<Vec<MemoryFact>> {
-        let limit = limit as i64;
+        let limit = usize_to_i64_saturated(limit);
 
         let facts =
             sqlx::query_as::<_, (String, String, f32, String, chrono::DateTime<chrono::Utc>)>(
@@ -206,7 +206,7 @@ impl MemoryStore for PostgresMemoryStore {
         user_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<ChatMessageRecord>> {
-        let limit = limit as i64;
+        let limit = usize_to_i64_saturated(limit);
 
         let mut messages = sqlx::query_as::<
             _,
@@ -298,7 +298,7 @@ impl MemoryStore for PostgresMemoryStore {
     }
 
     async fn list_users(&self, limit: usize) -> anyhow::Result<Vec<UserDashboardSummary>> {
-        let limit = limit as i64;
+        let limit = usize_to_i64_saturated(limit);
 
         let users = sqlx::query_as::<_, (String, i64, i64, chrono::DateTime<chrono::Utc>)>(
             "SELECT
@@ -379,7 +379,7 @@ impl MemoryStore for PostgresMemoryStore {
         user_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<ToolCallRecord>> {
-        let limit = limit as i64;
+        let limit = usize_to_i64_saturated(limit);
         let mut calls = sqlx::query_as::<
             _,
             (
@@ -478,7 +478,7 @@ impl MemoryStore for PostgresMemoryStore {
         user_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<OrchestrationDecisionRecord>> {
-        let limit = limit as i64;
+        let limit = usize_to_i64_saturated(limit);
         let mut decisions = sqlx::query_as::<
             _,
             (
@@ -576,7 +576,7 @@ impl MemoryStore for PostgresMemoryStore {
         user_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<MessageLatencyRecord>> {
-        let limit = limit as i64;
+        let limit = usize_to_i64_saturated(limit);
         let mut latencies = sqlx::query_as::<
             _,
             (
@@ -666,6 +666,14 @@ fn u64_to_i64_saturated(value: u64) -> i64 {
     }
 }
 
+fn usize_to_i64_saturated(value: usize) -> i64 {
+    if value > i64::MAX as usize {
+        i64::MAX
+    } else {
+        value as i64
+    }
+}
+
 fn i64_to_u64_saturated(value: i64) -> u64 {
     if value <= 0 { 0 } else { value as u64 }
 }
@@ -686,10 +694,19 @@ fn escape_like_pattern(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_like_pattern;
+    use super::{escape_like_pattern, usize_to_i64_saturated};
 
     #[test]
     fn escape_like_pattern_escapes_wildcards() {
         assert_eq!(escape_like_pattern("a_b%!!"), "a!_b!%!!!!");
+    }
+
+    #[test]
+    fn usize_to_i64_saturated_caps_large_values() {
+        if usize::MAX > i64::MAX as usize {
+            assert_eq!(usize_to_i64_saturated(usize::MAX), i64::MAX);
+        } else {
+            assert_eq!(usize_to_i64_saturated(usize::MAX), usize::MAX as i64);
+        }
     }
 }
