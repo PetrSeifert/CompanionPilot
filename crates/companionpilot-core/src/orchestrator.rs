@@ -264,7 +264,7 @@ impl DefaultChatOrchestrator {
                 &NativeTurnDecision::ToolRequest {
                     tool_count: planned_tool_calls.len(),
                     payload: json!({
-                        "assistant_text_preview": assistant_text,
+                        "assistant_reasoning": assistant_text,
                         "raw_tool_call_count": raw_tool_call_count,
                         "dropped_tool_call_count": raw_tool_call_count
                             .saturating_sub(planned_tool_calls.len()),

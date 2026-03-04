@@ -862,10 +862,46 @@ body::before {
   background: rgba(58, 138, 124, 0.06);
 }
 
+.detail-icon.reason {
+  color: #b79adf;
+  border-color: rgba(183, 154, 223, 0.34);
+  background: rgba(183, 154, 223, 0.08);
+}
+
 .detail-icon.latency {
   color: var(--text-primary);
   border-color: rgba(224, 221, 213, 0.25);
   background: rgba(224, 221, 213, 0.06);
+}
+
+.reply-detail-reason-text {
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reply-detail-reason {
+  color: var(--text-faint);
+  min-width: 0;
+  flex: 1;
+}
+
+.reply-detail-reason > summary {
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reply-detail-reason > summary::marker {
+  color: var(--text-faint);
+}
+
+.reply-detail-reason-body {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-faint);
 }
 
 .reply-timings {
@@ -1807,6 +1843,48 @@ pre.json-block {
     return pre;
   }
 
+  function parseJsonSafely(raw) {
+    if (typeof raw !== 'string' || !raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function extractAssistantReasoningFromPayload(payload) {
+    const parsedPayload = typeof payload === 'string'
+      ? parseJsonSafely(payload)
+      : payload;
+    if (!parsedPayload || typeof parsedPayload !== 'object') return '';
+    const decisionPayload = parsedPayload.decision
+      && typeof parsedPayload.decision === 'object'
+      ? parsedPayload.decision
+      : parsedPayload;
+    const reasoning = decisionPayload.assistant_reasoning || decisionPayload.assistant_text_preview;
+    return typeof reasoning === 'string' ? reasoning.trim() : '';
+  }
+
+  function makeInlineReasonNode(reasoning, previewChars) {
+    const maxChars = Number.isFinite(previewChars) ? previewChars : 120;
+    if (reasoning.length <= maxChars) {
+      const text = document.createElement('span');
+      text.className = 'reply-detail-reason-text';
+      text.textContent = reasoning;
+      return text;
+    }
+    const details = document.createElement('details');
+    details.className = 'reply-detail-reason';
+    const summary = document.createElement('summary');
+    summary.textContent = reasoning.slice(0, maxChars).trimEnd() + '...';
+    const full = document.createElement('div');
+    full.className = 'reply-detail-reason-body';
+    full.textContent = reasoning;
+    details.appendChild(summary);
+    details.appendChild(full);
+    return details;
+  }
+
   // ===== LOADING =====
   let loadCount = 0;
   function showLoading() {
@@ -2147,6 +2225,20 @@ pre.json-block {
             item.appendChild(icon);
             item.appendChild(label);
             details.appendChild(item);
+
+            const assistantReasoning = extractAssistantReasoningFromPayload(dec.payload_json);
+            if (assistantReasoning) {
+              const reasonItem = document.createElement('div');
+              reasonItem.className = 'reply-detail-item';
+
+              const reasonIcon = document.createElement('span');
+              reasonIcon.className = 'detail-icon reason';
+              reasonIcon.textContent = 'REASON';
+
+              reasonItem.appendChild(reasonIcon);
+              reasonItem.appendChild(makeInlineReasonNode(assistantReasoning, 120));
+              details.appendChild(reasonItem);
+            }
           });
 
           matchedTools.forEach(tc => {
@@ -2452,11 +2544,13 @@ pre.json-block {
 
       let parsedPayload = null;
       if (dec.payload_json) {
-        try {
-          parsedPayload = JSON.parse(dec.payload_json);
-        } catch (_) {
-          parsedPayload = null;
-        }
+        parsedPayload = parseJsonSafely(dec.payload_json);
+      }
+
+      const assistantReasoning = extractAssistantReasoningFromPayload(parsedPayload);
+      if (assistantReasoning) {
+        const row = makeDetailRow('ASSISTANT REASONING', assistantReasoning);
+        inner.appendChild(row);
       }
 
       const inputSnapshot = parsedPayload
