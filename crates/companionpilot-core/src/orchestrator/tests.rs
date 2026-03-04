@@ -93,6 +93,7 @@ impl ModelProvider for FollowupLoopModelProvider {
                         "max_results": 3
                     }),
                 }],
+                reasoning: None,
             });
         }
         if !saw_beta {
@@ -106,12 +107,14 @@ impl ModelProvider for FollowupLoopModelProvider {
                         "max_results": 2
                     }),
                 }],
+                reasoning: None,
             });
         }
 
         Ok(ModelTurnResponse {
             assistant_text: "Final answer from native tool loop.".to_owned(),
             tool_calls: Vec::new(),
+            reasoning: None,
         })
     }
 }
@@ -171,6 +174,7 @@ impl ModelProvider for SkillSelectionContractModelProvider {
         Ok(ModelTurnResponse {
             assistant_text: "selector contract ok".to_owned(),
             tool_calls: Vec::new(),
+            reasoning: None,
         })
     }
 }
@@ -205,6 +209,7 @@ impl ModelProvider for InvalidToolCallThenFinalModelProvider {
             return Ok(ModelTurnResponse {
                 assistant_text: "Recovered after invalid tool call.".to_owned(),
                 tool_calls: Vec::new(),
+                reasoning: None,
             });
         }
 
@@ -215,6 +220,7 @@ impl ModelProvider for InvalidToolCallThenFinalModelProvider {
                 name: "run_terminal_command".to_owned(),
                 arguments: json!({ "command": "spogo" }),
             }],
+            reasoning: None,
         })
     }
 }
@@ -242,6 +248,7 @@ impl ModelProvider for EmptyTurnModelProvider {
         Ok(ModelTurnResponse {
             assistant_text: String::new(),
             tool_calls: Vec::new(),
+            reasoning: None,
         })
     }
 }

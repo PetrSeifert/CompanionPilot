@@ -44,6 +44,7 @@ impl OpenRouterProvider {
                 ChatCompletionMessage {
                     role: "system".to_owned(),
                     content: request.system_prompt,
+                    reasoning: None,
                     name: None,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
@@ -51,6 +52,7 @@ impl OpenRouterProvider {
                 ChatCompletionMessage {
                     role: "user".to_owned(),
                     content: request.user_prompt,
+                    reasoning: None,
                     name: None,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
@@ -58,6 +60,7 @@ impl OpenRouterProvider {
             ],
             tools: Vec::new(),
             tool_choice: None,
+            reasoning: None,
         };
 
         let response = self.post_chat_completion(payload).await?;
@@ -79,6 +82,7 @@ impl OpenRouterProvider {
         messages.push(ChatCompletionMessage {
             role: "system".to_owned(),
             content: request.system_prompt,
+            reasoning: None,
             name: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
@@ -96,6 +100,7 @@ impl OpenRouterProvider {
                 .map(serialize_tool_definition)
                 .collect::<Vec<_>>(),
             tool_choice: Some("auto"),
+            reasoning: Some(ReasoningConfig { effort: "low" }),
         };
 
         let response = self.post_chat_completion(payload).await?;
@@ -106,10 +111,15 @@ impl OpenRouterProvider {
         let assistant_text =
             extract_message_content(choice.message.content.as_ref()).unwrap_or_default();
         let tool_calls = parse_tool_calls(&choice.message.tool_calls)?;
+        let reasoning = extract_message_reasoning(
+            choice.message.reasoning.as_deref(),
+            choice.message.reasoning_details.as_ref(),
+        );
 
         Ok(ModelTurnResponse {
             assistant_text,
             tool_calls,
+            reasoning,
         })
     }
 
@@ -156,6 +166,7 @@ fn serialize_model_message(message: ModelMessage) -> anyhow::Result<ChatCompleti
     Ok(ChatCompletionMessage {
         role: message.role.as_str().to_owned(),
         content: message.content,
+        reasoning: message.reasoning,
         name: message.name,
         tool_call_id: message.tool_call_id,
         tool_calls,
@@ -216,12 +227,21 @@ struct ChatCompletionRequest {
     tools: Vec<ChatCompletionToolDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReasoningConfig {
+    effort: &'static str,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ChatCompletionMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,6 +292,10 @@ struct ChatChoice {
 struct ChatChoiceMessage {
     content: Option<Value>,
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_details: Option<Value>,
+    #[serde(default)]
     tool_calls: Vec<ChatCompletionToolCall>,
 }
 
@@ -304,4 +328,73 @@ fn extract_message_content(content: Option<&Value>) -> Option<String> {
     } else {
         Some(joined)
     }
+}
+
+fn extract_message_reasoning(
+    reasoning: Option<&str>,
+    reasoning_details: Option<&Value>,
+) -> Option<String> {
+    if let Some(text) = reasoning.map(str::trim).filter(|text| !text.is_empty()) {
+        return Some(text.to_owned());
+    }
+
+    extract_reasoning_details(reasoning_details)
+}
+
+fn extract_reasoning_details(reasoning_details: Option<&Value>) -> Option<String> {
+    let details = reasoning_details?;
+
+    if let Some(text) = details
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_owned());
+    }
+
+    if let Some(array) = details.as_array() {
+        let joined = array
+            .iter()
+            .filter_map(extract_reasoning_text_fragment)
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (!joined.is_empty()).then_some(joined);
+    }
+
+    extract_reasoning_text_fragment(details)
+}
+
+fn extract_reasoning_text_fragment(value: &Value) -> Option<String> {
+    if let Some(text) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_owned());
+    }
+
+    let object = value.as_object()?;
+    for key in ["reasoning", "text", "content", "summary"] {
+        if let Some(text) = object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text.to_owned());
+        }
+    }
+
+    if let Some(content_array) = object.get("content").and_then(Value::as_array) {
+        let joined = content_array
+            .iter()
+            .filter_map(extract_reasoning_text_fragment)
+            .collect::<Vec<_>>()
+            .join("");
+        if !joined.is_empty() {
+            return Some(joined);
+        }
+    }
+
+    None
 }

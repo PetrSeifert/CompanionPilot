@@ -142,6 +142,7 @@ impl DefaultChatOrchestrator {
             name: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
+            reasoning: None,
         }];
 
         let mut native_reply_text: Option<String> = None;
@@ -181,6 +182,15 @@ impl DefaultChatOrchestrator {
             };
 
             let assistant_text = turn_result.assistant_text.trim().to_owned();
+            let assistant_reasoning = turn_result
+                .reasoning
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned);
+            let reasoning_text = assistant_reasoning
+                .clone()
+                .unwrap_or_else(|| assistant_text.clone());
             let raw_tool_calls = turn_result.tool_calls.clone();
             let planned_tool_calls = sanitize_native_tool_calls(turn_result.tool_calls);
             conversation_messages.push(ModelMessage {
@@ -189,6 +199,7 @@ impl DefaultChatOrchestrator {
                 name: None,
                 tool_call_id: None,
                 tool_calls: raw_tool_calls,
+                reasoning: assistant_reasoning.clone(),
             });
             let raw_tool_call_count = conversation_messages
                 .last()
@@ -233,6 +244,7 @@ impl DefaultChatOrchestrator {
                         name: None,
                         tool_call_id: None,
                         tool_calls: Vec::new(),
+                        reasoning: None,
                     });
                     continue;
                 }
@@ -244,6 +256,7 @@ impl DefaultChatOrchestrator {
                         response_text: assistant_text.clone(),
                         payload: json!({
                             "assistant_text": assistant_text,
+                            "assistant_reasoning": reasoning_text,
                             "tool_calls": [],
                             "model_input_snapshot": input_snapshot,
                         }),
@@ -264,7 +277,7 @@ impl DefaultChatOrchestrator {
                 &NativeTurnDecision::ToolRequest {
                     tool_count: planned_tool_calls.len(),
                     payload: json!({
-                        "assistant_reasoning": assistant_text,
+                        "assistant_reasoning": reasoning_text,
                         "raw_tool_call_count": raw_tool_call_count,
                         "dropped_tool_call_count": raw_tool_call_count
                             .saturating_sub(planned_tool_calls.len()),

@@ -54,6 +54,7 @@ impl DefaultChatOrchestrator {
                 name: Some(result.output.tool_name.clone()),
                 tool_call_id: Some(result.output.tool_call_id.clone()),
                 tool_calls: Vec::new(),
+                reasoning: None,
             });
             tool_outputs.push(result.output);
         }

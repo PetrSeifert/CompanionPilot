@@ -42,6 +42,7 @@ impl ModelProvider for MockModelProvider {
                 return Ok(ModelTurnResponse {
                     assistant_text: "Final answer from native tool loop.".to_owned(),
                     tool_calls: Vec::new(),
+                    reasoning: None,
                 });
             }
 
@@ -53,6 +54,7 @@ impl ModelProvider for MockModelProvider {
                         "web_search",
                         json!({ "query": "beta", "max_results": 2 }),
                     )],
+                    reasoning: None,
                 });
             }
 
@@ -63,6 +65,7 @@ impl ModelProvider for MockModelProvider {
                     "web_search",
                     json!({ "query": "alpha", "max_results": 3 }),
                 )],
+                reasoning: None,
             });
         }
 
@@ -75,6 +78,7 @@ impl ModelProvider for MockModelProvider {
             return Ok(ModelTurnResponse {
                 assistant_text: format!("Tool summary:\n{joined}"),
                 tool_calls: Vec::new(),
+                reasoning: None,
             });
         }
 
@@ -139,12 +143,14 @@ impl ModelProvider for MockModelProvider {
             return Ok(ModelTurnResponse {
                 assistant_text: String::new(),
                 tool_calls,
+                reasoning: None,
             });
         }
 
         Ok(ModelTurnResponse {
             assistant_text: format!("CompanionPilot mock reply to: {user_input}"),
             tool_calls: Vec::new(),
+            reasoning: None,
         })
     }
 }

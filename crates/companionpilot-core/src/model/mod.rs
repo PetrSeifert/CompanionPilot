@@ -53,6 +53,8 @@ pub struct ModelMessage {
     pub tool_call_id: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<ModelToolCall>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +77,8 @@ pub struct ModelTurnResponse {
     pub assistant_text: String,
     #[serde(default)]
     pub tool_calls: Vec<ModelToolCall>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
 }
 
 #[async_trait]
