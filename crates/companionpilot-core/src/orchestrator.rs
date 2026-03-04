@@ -21,6 +21,7 @@ use crate::{
 mod contracts;
 mod parse;
 mod planners;
+mod program_exec;
 mod prompts;
 mod sanitize;
 mod telemetry;

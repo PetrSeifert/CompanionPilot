@@ -17,10 +17,10 @@ use super::{
     util::elapsed_ms,
 };
 
-struct ToolExecutionResult {
-    output: ExecutedToolOutput,
-    timing: ToolCallTiming,
-    citations: Vec<String>,
+pub(super) struct ToolExecutionResult {
+    pub(super) output: ExecutedToolOutput,
+    pub(super) timing: ToolCallTiming,
+    pub(super) citations: Vec<String>,
 }
 
 impl DefaultChatOrchestrator {
@@ -34,7 +34,11 @@ impl DefaultChatOrchestrator {
         citations: &mut Vec<String>,
         tool_timings: &mut Vec<ToolCallTiming>,
     ) -> Vec<ModelMessage> {
-        let futures = planned_tool_calls
+        let (program_calls, normal_calls): (Vec<_>, Vec<_>) = planned_tool_calls
+            .into_iter()
+            .partition(|planned_call| planned_call.call.tool_name == "execute_program");
+
+        let futures = normal_calls
             .into_iter()
             .map(|planned_call| {
                 let call = planned_call.call.clone();
@@ -44,7 +48,8 @@ impl DefaultChatOrchestrator {
             .collect::<Vec<_>>();
 
         let results = join_all(futures).await;
-        let mut tool_messages = Vec::with_capacity(results.len());
+        let mut tool_messages =
+            Vec::with_capacity(results.len().saturating_add(program_calls.len()));
         for result in results {
             citations.extend(result.citations.clone());
             tool_timings.push(result.timing.clone());
@@ -59,10 +64,43 @@ impl DefaultChatOrchestrator {
             tool_outputs.push(result.output);
         }
 
+        for planned_program_call in program_calls {
+            let call = planned_program_call.call.clone();
+            let call_id = planned_program_call.call_id.clone();
+            executed_tool_calls.push(call.clone());
+
+            let program_result = self
+                .execute_program(ctx, planned_program_call, source.to_owned())
+                .await;
+
+            for step in &program_result.steps {
+                citations.extend(step.citations.clone());
+                tool_timings.push(step.timing.clone());
+                executed_tool_calls.push(step.tool_call.clone());
+            }
+
+            let output = ExecutedToolOutput {
+                tool_call_id: call_id,
+                tool_name: call.tool_name,
+                args: call.args,
+                success: program_result.success,
+                text: program_result.combined_text,
+            };
+            tool_messages.push(ModelMessage {
+                role: ModelMessageRole::Tool,
+                content: output.text.clone(),
+                name: Some(output.tool_name.clone()),
+                tool_call_id: Some(output.tool_call_id.clone()),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            });
+            tool_outputs.push(output);
+        }
+
         tool_messages
     }
 
-    async fn execute_single_tool_call(
+    pub(super) async fn execute_single_tool_call(
         &self,
         ctx: &MessageCtx,
         planned_call: SanitizedToolCall,

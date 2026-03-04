@@ -119,5 +119,38 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
                 "additionalProperties": false
             }),
         },
+        ModelToolDefinition {
+            name: "execute_program".to_owned(),
+            description: "Execute a dependent sequence of tool calls where later steps can reference earlier outputs.".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step_id": {
+                                    "type": "string",
+                                    "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                                },
+                                "tool_name": { "type": "string", "minLength": 1 },
+                                "arguments": { "type": "object" }
+                            },
+                            "required": ["step_id", "tool_name", "arguments"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
+                },
+                "required": ["steps", "reasoning"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }

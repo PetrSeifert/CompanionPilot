@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -20,8 +21,12 @@ use crate::{
     types::MessageCtx,
 };
 
+use super::program_exec::substitute_variables;
 use super::telemetry::truncate_for_log;
-use super::{DefaultChatOrchestrator, sanitize::clean_memory_value, sanitize::sanitize_memory_key};
+use super::{
+    DefaultChatOrchestrator,
+    sanitize::{clean_memory_value, sanitize_memory_key, sanitize_native_tool_calls},
+};
 
 fn empty_skill_catalog() -> Arc<SkillCatalog> {
     Arc::new(SkillCatalog::default())
@@ -280,6 +285,188 @@ impl ToolExecutor for StubWebSearchToolExecutor {
     }
 }
 
+#[derive(Debug, Default)]
+struct ProgramChainModelProvider;
+
+#[async_trait]
+impl ModelProvider for ProgramChainModelProvider {
+    async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+        if request
+            .system_prompt
+            .contains("You are the skill selector for CompanionPilot.")
+        {
+            return Ok(json!({
+                "selected_skills": [],
+                "rationale": "program_chain_selector"
+            })
+            .to_string());
+        }
+        Ok("fallback synthesis".to_owned())
+    }
+
+    async fn complete_turn(&self, request: ModelTurnRequest) -> anyhow::Result<ModelTurnResponse> {
+        let program_output = request.messages.iter().find(|message| {
+            message.role == ModelMessageRole::Tool
+                && message.name.as_deref() == Some("execute_program")
+        });
+        if let Some(program_output) = program_output {
+            assert!(
+                program_output.content.contains("result:result:alpha"),
+                "program output should include substituted second-step output"
+            );
+            return Ok(ModelTurnResponse {
+                assistant_text: "Program chain complete.".to_owned(),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            });
+        }
+
+        Ok(ModelTurnResponse {
+            assistant_text: String::new(),
+            tool_calls: vec![ModelToolCall {
+                id: "program-chain-call".to_owned(),
+                name: "execute_program".to_owned(),
+                arguments: json!({
+                    "reasoning": "step output should feed into next step",
+                    "steps": [
+                        {
+                            "step_id": "first",
+                            "tool_name": "web_search",
+                            "arguments": {
+                                "query": "alpha",
+                                "max_results": 1
+                            }
+                        },
+                        {
+                            "step_id": "second",
+                            "tool_name": "web_search",
+                            "arguments": {
+                                "query": "${first}",
+                                "max_results": 1
+                            }
+                        }
+                    ]
+                }),
+            }],
+            reasoning: None,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProgramAbortModelProvider;
+
+#[async_trait]
+impl ModelProvider for ProgramAbortModelProvider {
+    async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+        if request
+            .system_prompt
+            .contains("You are the skill selector for CompanionPilot.")
+        {
+            return Ok(json!({
+                "selected_skills": [],
+                "rationale": "program_abort_selector"
+            })
+            .to_string());
+        }
+        Ok("fallback synthesis".to_owned())
+    }
+
+    async fn complete_turn(&self, request: ModelTurnRequest) -> anyhow::Result<ModelTurnResponse> {
+        let program_output = request.messages.iter().find(|message| {
+            message.role == ModelMessageRole::Tool
+                && message.name.as_deref() == Some("execute_program")
+        });
+        if let Some(program_output) = program_output {
+            assert!(
+                program_output.content.contains("forced failure"),
+                "program output should include failing step error"
+            );
+            return Ok(ModelTurnResponse {
+                assistant_text: "Program failure handled.".to_owned(),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            });
+        }
+
+        Ok(ModelTurnResponse {
+            assistant_text: String::new(),
+            tool_calls: vec![ModelToolCall {
+                id: "program-abort-call".to_owned(),
+                name: "execute_program".to_owned(),
+                arguments: json!({
+                    "reasoning": "stop at first failed step",
+                    "steps": [
+                        {
+                            "step_id": "first",
+                            "tool_name": "web_search",
+                            "arguments": {
+                                "query": "alpha",
+                                "max_results": 1
+                            }
+                        },
+                        {
+                            "step_id": "second",
+                            "tool_name": "web_search",
+                            "arguments": {
+                                "query": "${first}-force-fail",
+                                "max_results": 1
+                            }
+                        },
+                        {
+                            "step_id": "third",
+                            "tool_name": "web_search",
+                            "arguments": {
+                                "query": "gamma",
+                                "max_results": 1
+                            }
+                        }
+                    ]
+                }),
+            }],
+            reasoning: None,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProgramWebSearchToolExecutor {
+    queries: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ToolExecutor for ProgramWebSearchToolExecutor {
+    async fn execute(
+        &self,
+        tool_name: &str,
+        args: Value,
+        _message_ctx: &MessageCtx,
+    ) -> anyhow::Result<ToolResult> {
+        if tool_name != "web_search" {
+            return Err(anyhow::anyhow!("unknown tool: {tool_name}"));
+        }
+
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing query arg"))?
+            .to_owned();
+        self.queries
+            .lock()
+            .expect("queries lock should succeed")
+            .push(query.clone());
+
+        if query.contains("force-fail") {
+            return Err(anyhow::anyhow!("forced failure for query: {query}"));
+        }
+
+        Ok(ToolResult {
+            text: format!("result:{query}"),
+            citations: vec![format!("https://example.com/{query}")],
+        })
+    }
+}
+
 #[tokio::test]
 async fn persists_simple_name_fact() {
     let memory = Arc::new(InMemoryMemoryStore::default());
@@ -502,6 +689,173 @@ async fn invalid_tool_call_is_recovered_without_internal_error() {
         }),
         "invalid tool call fallback should be logged"
     );
+}
+
+#[tokio::test]
+async fn program_two_step_chain_substitutes_variables() {
+    let memory = Arc::new(InMemoryMemoryStore::default());
+    let tools = Arc::new(ProgramWebSearchToolExecutor::default());
+    let orchestrator = DefaultChatOrchestrator::new(
+        Arc::new(ProgramChainModelProvider),
+        memory,
+        tools.clone(),
+        empty_skill_catalog(),
+        SafetyPolicy::default(),
+    );
+
+    let result = orchestrator
+        .handle_message(MessageCtx {
+            message_id: "3f".into(),
+            user_id: "u3f".into(),
+            guild_id: "g1".into(),
+            channel_id: "c1".into(),
+            content: "chain dependent calls".into(),
+            timestamp: Utc::now(),
+        })
+        .await
+        .expect("program chain should complete");
+
+    assert_eq!(result.text, "Program chain complete.");
+    assert!(
+        result
+            .tool_calls
+            .iter()
+            .any(|call| call.tool_name == "execute_program")
+    );
+
+    let queries = tools
+        .queries
+        .lock()
+        .expect("queries lock should succeed")
+        .clone();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0], "alpha");
+    assert_eq!(queries[1], "result:alpha");
+}
+
+#[tokio::test]
+async fn program_aborts_on_step_failure() {
+    let memory = Arc::new(InMemoryMemoryStore::default());
+    let tools = Arc::new(ProgramWebSearchToolExecutor::default());
+    let orchestrator = DefaultChatOrchestrator::new(
+        Arc::new(ProgramAbortModelProvider),
+        memory,
+        tools.clone(),
+        empty_skill_catalog(),
+        SafetyPolicy::default(),
+    );
+
+    let result = orchestrator
+        .handle_message(MessageCtx {
+            message_id: "3g".into(),
+            user_id: "u3g".into(),
+            guild_id: "g1".into(),
+            channel_id: "c1".into(),
+            content: "abort on failure".into(),
+            timestamp: Utc::now(),
+        })
+        .await
+        .expect("program failure should still produce a final answer");
+
+    assert_eq!(result.text, "Program failure handled.");
+    let queries = tools
+        .queries
+        .lock()
+        .expect("queries lock should succeed")
+        .clone();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0], "alpha");
+    assert_eq!(queries[1], "result:alpha-force-fail");
+}
+
+#[test]
+fn program_rejects_forward_references() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "program-1".to_owned(),
+        name: "execute_program".to_owned(),
+        arguments: json!({
+            "reasoning": "invalid forward ref",
+            "steps": [
+                {
+                    "step_id": "first",
+                    "tool_name": "web_search",
+                    "arguments": { "query": "${second}" }
+                },
+                {
+                    "step_id": "second",
+                    "tool_name": "web_search",
+                    "arguments": { "query": "ok" }
+                }
+            ]
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn program_rejects_nested_execute_program() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "program-2".to_owned(),
+        name: "execute_program".to_owned(),
+        arguments: json!({
+            "reasoning": "nested should fail",
+            "steps": [
+                {
+                    "step_id": "first",
+                    "tool_name": "execute_program",
+                    "arguments": {}
+                }
+            ]
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn program_rejects_duplicate_step_ids() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "program-3".to_owned(),
+        name: "execute_program".to_owned(),
+        arguments: json!({
+            "reasoning": "duplicate ids should fail",
+            "steps": [
+                {
+                    "step_id": "dup",
+                    "tool_name": "web_search",
+                    "arguments": { "query": "alpha" }
+                },
+                {
+                    "step_id": "dup",
+                    "tool_name": "web_search",
+                    "arguments": { "query": "beta" }
+                }
+            ]
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn substitute_variables_replaces_in_nested_json() {
+    let mut substitutions = HashMap::new();
+    substitutions.insert("step_one".to_owned(), "VALUE".to_owned());
+    let input = json!({
+        "plain": "no refs",
+        "list": [
+            "prefix ${step_one}",
+            {
+                "nested": "${step_one} / ${missing}"
+            }
+        ],
+        "number": 42
+    });
+
+    let output = substitute_variables(&input, &substitutions);
+
+    assert_eq!(output["plain"], "no refs");
+    assert_eq!(output["list"][0], "prefix VALUE");
+    assert_eq!(output["list"][1]["nested"], "VALUE / ${missing}");
+    assert_eq!(output["number"], 42);
 }
 
 #[test]

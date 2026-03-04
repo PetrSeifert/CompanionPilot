@@ -54,6 +54,7 @@ When you need current/news/price/weather/factual verification, call `web_search`
 When you need to execute a local command, call `run_terminal_command`.
 For `run_terminal_command`, provide either `command` (string) or `args` (array<string> or string).
 Do not include shell operators like `|`, `&&`, `||`, `;`, or redirection.
+When you need to chain dependent tool calls, use `execute_program` with steps and reference prior step outputs in string args via ${step_id}.
 Use `current_datetime` when the request depends on current date/time context.
 If a durable user fact is stated or corrected, call `store_memory` with key/value/confidence.
 Do not emit pseudo tool-call markup in normal text responses."

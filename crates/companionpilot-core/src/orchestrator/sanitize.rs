@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::Utc;
 use serde_json::{Value, json};
 use tracing::debug;
@@ -124,6 +126,105 @@ fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCal
                 }),
             }
         }
+        "execute_program" => {
+            let Some(steps) = raw_call.arguments.get("steps").and_then(Value::as_array) else {
+                debug!("dropping execute_program call with missing steps array");
+                return None;
+            };
+            if steps.is_empty() || steps.len() > 10 {
+                debug!(
+                    step_count = steps.len(),
+                    "dropping execute_program call with invalid step count"
+                );
+                return None;
+            }
+
+            let mut seen_step_ids = HashSet::new();
+            let mut prior_step_ids = HashSet::new();
+            let mut sanitized_steps = Vec::with_capacity(steps.len());
+
+            for step in steps {
+                let Some(step_obj) = step.as_object() else {
+                    debug!("dropping execute_program call with non-object step");
+                    return None;
+                };
+
+                let step_id = step_obj
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if step_id.is_empty() || !is_valid_step_id(step_id) {
+                    debug!(
+                        step_id,
+                        "dropping execute_program call with invalid step_id"
+                    );
+                    return None;
+                }
+                if !seen_step_ids.insert(step_id.to_owned()) {
+                    debug!(
+                        step_id,
+                        "dropping execute_program call with duplicate step_id"
+                    );
+                    return None;
+                }
+
+                let tool_name = step_obj
+                    .get("tool_name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if tool_name.is_empty() {
+                    debug!(
+                        step_id,
+                        "dropping execute_program call with empty tool_name"
+                    );
+                    return None;
+                }
+                if tool_name == "execute_program" {
+                    debug!(
+                        step_id,
+                        "dropping execute_program call with nested execute_program step"
+                    );
+                    return None;
+                }
+
+                let Some(arguments_obj) = step_obj.get("arguments").and_then(Value::as_object)
+                else {
+                    debug!(
+                        step_id,
+                        "dropping execute_program call with non-object step arguments"
+                    );
+                    return None;
+                };
+                let arguments = Value::Object(arguments_obj.clone());
+                let references = extract_step_references(&arguments);
+                for reference in references {
+                    if !prior_step_ids.contains(&reference) {
+                        debug!(
+                            step_id,
+                            reference,
+                            "dropping execute_program call with invalid/forward step reference"
+                        );
+                        return None;
+                    }
+                }
+
+                prior_step_ids.insert(step_id.to_owned());
+                sanitized_steps.push(json!({
+                    "step_id": step_id,
+                    "tool_name": tool_name,
+                    "arguments": arguments
+                }));
+            }
+
+            ToolCall {
+                tool_name: "execute_program".to_owned(),
+                args: json!({
+                    "steps": sanitized_steps
+                }),
+            }
+        }
         other => {
             debug!(tool_name = other, "dropping unknown native tool call");
             return None;
@@ -135,6 +236,44 @@ fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCal
         call,
         reasoning,
     })
+}
+
+pub(super) fn is_valid_step_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+pub(super) fn extract_step_references(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(text) => {
+            let mut references = Vec::new();
+            for (start, _) in text.match_indices("${") {
+                let rest = &text[(start + 2)..];
+                if let Some(end) = rest.find('}') {
+                    let step_id = &rest[..end];
+                    if !step_id.is_empty() {
+                        references.push(step_id.to_owned());
+                    }
+                }
+            }
+            references
+        }
+        Value::Array(items) => items
+            .iter()
+            .flat_map(extract_step_references)
+            .collect::<Vec<_>>(),
+        Value::Object(object) => object
+            .values()
+            .flat_map(extract_step_references)
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    }
 }
 
 pub(super) fn memory_fact_from_store_memory_args(args: &Value) -> Option<MemoryFact> {
