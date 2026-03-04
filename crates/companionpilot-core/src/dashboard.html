@@ -2450,6 +2450,47 @@ pre.json-block {
         inner.appendChild(row);
       }
 
+      let parsedPayload = null;
+      if (dec.payload_json) {
+        try {
+          parsedPayload = JSON.parse(dec.payload_json);
+        } catch (_) {
+          parsedPayload = null;
+        }
+      }
+
+      const inputSnapshot = parsedPayload
+        && parsedPayload.decision
+        && parsedPayload.decision.model_input_snapshot
+        ? parsedPayload.decision.model_input_snapshot
+        : null;
+
+      if (inputSnapshot) {
+        const snapshotLabel = document.createElement('div');
+        snapshotLabel.className = 'detail-label';
+        snapshotLabel.textContent = 'MODEL INPUT SNAPSHOT';
+        inner.appendChild(snapshotLabel);
+
+        if (inputSnapshot.user_request) {
+          inner.appendChild(makeDetailRow('USER REQUEST', inputSnapshot.user_request));
+        }
+        if (inputSnapshot.selected_skill_ids && inputSnapshot.selected_skill_ids.length > 0) {
+          inner.appendChild(makeDetailRow('SELECTED SKILLS', inputSnapshot.selected_skill_ids.join(', ')));
+        }
+        if (inputSnapshot.context && inputSnapshot.context.summary) {
+          inner.appendChild(makeDetailRow('SUMMARY', inputSnapshot.context.summary));
+        }
+        if (inputSnapshot.system_prompt_preview) {
+          const promptLabel = document.createElement('div');
+          promptLabel.className = 'detail-label';
+          promptLabel.textContent = 'SYSTEM PROMPT PREVIEW';
+          inner.appendChild(promptLabel);
+          inner.appendChild(syntaxHighlightJSON(JSON.stringify(inputSnapshot.system_prompt_preview, null, 2)));
+        }
+
+        inner.appendChild(syntaxHighlightJSON(JSON.stringify(inputSnapshot, null, 2)));
+      }
+
       // Payload
       if (dec.payload_json) {
         const pLabel = document.createElement('div');

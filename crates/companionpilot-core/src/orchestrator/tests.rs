@@ -176,6 +176,33 @@ impl ModelProvider for SkillSelectionContractModelProvider {
 }
 
 #[derive(Debug, Default)]
+struct EmptyTurnModelProvider;
+
+#[async_trait]
+impl ModelProvider for EmptyTurnModelProvider {
+    async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+        if request
+            .system_prompt
+            .contains("You are the skill selector for CompanionPilot.")
+        {
+            return Ok(json!({
+                "selected_skills": [],
+                "rationale": "empty_turn_selector"
+            })
+            .to_string());
+        }
+        Ok("Direct fallback answer.".to_owned())
+    }
+
+    async fn complete_turn(&self, _request: ModelTurnRequest) -> anyhow::Result<ModelTurnResponse> {
+        Ok(ModelTurnResponse {
+            assistant_text: String::new(),
+            tool_calls: Vec::new(),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
 struct StubWebSearchToolExecutor;
 
 #[async_trait]
@@ -267,7 +294,7 @@ async fn native_loop_can_run_multiple_tool_rounds_before_final_answer() {
     let memory = Arc::new(InMemoryMemoryStore::default());
     let orchestrator = DefaultChatOrchestrator::new(
         Arc::new(FollowupLoopModelProvider),
-        memory,
+        memory.clone(),
         Arc::new(StubWebSearchToolExecutor),
         empty_skill_catalog(),
         SafetyPolicy::default(),
@@ -292,6 +319,23 @@ async fn native_loop_can_run_multiple_tool_rounds_before_final_answer() {
     assert_eq!(result.tool_calls[1].args["query"], "beta");
     assert_eq!(result.text, "Final answer from native tool loop.");
     assert_eq!(result.citations.len(), 2);
+
+    let decisions = memory
+        .list_orchestration_decisions("u3b", 20)
+        .await
+        .expect("orchestration decisions should list");
+    let tool_request = decisions
+        .iter()
+        .find(|decision| decision.stage == "native_turn" && decision.decision == "request_tools")
+        .expect("native turn tool request should be logged");
+    let payload: Value = serde_json::from_str(&tool_request.payload_json)
+        .expect("tool request payload should be valid JSON");
+    assert!(
+        payload["decision"]["model_input_snapshot"]["user_request"]
+            .as_str()
+            .is_some(),
+        "tool request payload should include model input snapshot"
+    );
 }
 
 #[tokio::test]
@@ -340,6 +384,33 @@ async fn skill_selector_uses_metadata_only_and_runs_before_native_loop() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     assert_eq!(selected, vec!["focus-skill"]);
+}
+
+#[tokio::test]
+async fn empty_native_turn_uses_direct_answer_fallback_instead_of_internal_error() {
+    let memory = Arc::new(InMemoryMemoryStore::default());
+    let orchestrator = DefaultChatOrchestrator::new(
+        Arc::new(EmptyTurnModelProvider),
+        memory,
+        Arc::new(ToolRegistry::default()),
+        empty_skill_catalog(),
+        SafetyPolicy::default(),
+    );
+
+    let result = orchestrator
+        .handle_message(MessageCtx {
+            message_id: "3d".into(),
+            user_id: "u3d".into(),
+            guild_id: "g1".into(),
+            channel_id: "c1".into(),
+            content: "please use a tool".into(),
+            timestamp: Utc::now(),
+        })
+        .await
+        .expect("fallback should complete");
+
+    assert_eq!(result.text, "Direct fallback answer.");
+    assert!(result.tool_calls.is_empty());
 }
 
 #[test]

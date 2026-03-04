@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     memory::MemoryStore,
@@ -190,6 +190,26 @@ impl DefaultChatOrchestrator {
                 tool_call_id: None,
                 tool_calls: raw_tool_calls,
             });
+            let input_snapshot = build_turn_input_snapshot(
+                round,
+                &ctx.content,
+                &native_system_prompt,
+                &selected_skill_ids,
+                &memory_context,
+                &conversation_messages,
+            );
+            debug!(
+                round,
+                user_id = %ctx.user_id,
+                assistant_text_preview = %truncate_for_log(&assistant_text, 180),
+                raw_tool_call_count = conversation_messages
+                    .last()
+                    .map(|message| message.tool_calls.len())
+                    .unwrap_or(0),
+                sanitized_tool_call_count = planned_tool_calls.len(),
+                model_input_snapshot_preview = %truncate_for_log(&input_snapshot.to_string(), 500),
+                "native turn input snapshot captured"
+            );
 
             if planned_tool_calls.is_empty() {
                 self.record_native_turn_decision(
@@ -199,7 +219,8 @@ impl DefaultChatOrchestrator {
                         response_text: assistant_text.clone(),
                         payload: json!({
                             "assistant_text": assistant_text,
-                            "tool_calls": []
+                            "tool_calls": [],
+                            "model_input_snapshot": input_snapshot,
                         }),
                     },
                     round_decision_ms,
@@ -219,14 +240,16 @@ impl DefaultChatOrchestrator {
                     tool_count: planned_tool_calls.len(),
                     payload: json!({
                         "assistant_text_preview": assistant_text,
-                        "model_input_snapshot": build_turn_input_snapshot(
-                            round,
-                            &ctx.content,
-                            &native_system_prompt,
-                            &selected_skill_ids,
-                            &memory_context,
-                            &conversation_messages,
-                        ),
+                        "raw_tool_call_count": conversation_messages
+                            .last()
+                            .map(|message| message.tool_calls.len())
+                            .unwrap_or(0),
+                        "dropped_tool_call_count": conversation_messages
+                            .last()
+                            .map(|message| message.tool_calls.len())
+                            .unwrap_or(0)
+                            .saturating_sub(planned_tool_calls.len()),
+                        "model_input_snapshot": input_snapshot,
                         "tool_calls": planned_tool_calls
                             .iter()
                             .map(|call| json!({
@@ -288,11 +311,31 @@ impl DefaultChatOrchestrator {
                 });
             (synthesized, elapsed_ms(final_model_started_at))
         } else {
-            (
-                "I could not complete this request due to an internal orchestration error."
-                    .to_owned(),
-                0,
-            )
+            let final_model_started_at = Instant::now();
+            let direct_fallback_prompt = format!(
+                "{}\n\nFallback mode: if prior tool calls were invalid or empty, answer directly without tools.",
+                native_system_prompt
+            );
+            let direct_fallback = self
+                .model
+                .complete(ModelRequest {
+                    system_prompt: direct_fallback_prompt,
+                    user_prompt: ctx.content.clone(),
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    warn!(
+                        ?error,
+                        "failed direct-answer fallback after empty native tool loop"
+                    );
+                    "I couldn't complete that with tools. Please rephrase or provide more specific details.".to_owned()
+                });
+            let direct_fallback = if direct_fallback.trim().is_empty() {
+                "I couldn't complete that with tools. Please rephrase or provide more specific details.".to_owned()
+            } else {
+                direct_fallback
+            };
+            (direct_fallback, elapsed_ms(final_model_started_at))
         };
 
         let record_assistant_message_started_at = Instant::now();
