@@ -34,6 +34,7 @@ mod tests;
 use contracts::{NativeTurnDecision, SkillSelectionDecision};
 use prompts::build_native_agent_system_prompt;
 use sanitize::sanitize_native_tool_calls;
+use telemetry::truncate_for_log;
 use tool_exec::{dedupe_citations, fallback_tool_output_text};
 use tool_schema::build_native_tool_definitions;
 use util::elapsed_ms;
@@ -218,6 +219,14 @@ impl DefaultChatOrchestrator {
                     tool_count: planned_tool_calls.len(),
                     payload: json!({
                         "assistant_text_preview": assistant_text,
+                        "model_input_snapshot": build_turn_input_snapshot(
+                            round,
+                            &ctx.content,
+                            &native_system_prompt,
+                            &selected_skill_ids,
+                            &memory_context,
+                            &conversation_messages,
+                        ),
                         "tool_calls": planned_tool_calls
                             .iter()
                             .map(|call| json!({
@@ -360,6 +369,62 @@ impl DefaultChatOrchestrator {
 
         Ok(reply)
     }
+}
+
+fn build_turn_input_snapshot(
+    round: usize,
+    user_request: &str,
+    system_prompt: &str,
+    selected_skill_ids: &[String],
+    memory_context: &crate::types::MemoryContext,
+    conversation_messages: &[ModelMessage],
+) -> serde_json::Value {
+    let message_preview_limit = if round == 1 { 6 } else { 4 };
+    json!({
+        "round": round,
+        "user_request": truncate_for_log(user_request, 500),
+        "system_prompt_preview": truncate_for_log(system_prompt, 1200),
+        "selected_skill_ids": selected_skill_ids,
+        "context": {
+            "summary": memory_context.summary,
+            "known_facts": memory_context
+                .facts
+                .iter()
+                .take(16)
+                .map(|fact| format!("{}={}", fact.key, fact.value))
+                .collect::<Vec<_>>(),
+            "recent_messages": memory_context
+                .recent_messages
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>(),
+        },
+        "conversation_messages_preview": conversation_messages
+            .iter()
+            .rev()
+            .take(message_preview_limit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|message| {
+                json!({
+                    "role": message.role.as_str(),
+                    "name": message.name,
+                    "content_preview": truncate_for_log(&message.content, 220),
+                    "tool_calls": message
+                        .tool_calls
+                        .iter()
+                        .map(|call| json!({
+                            "id": call.id,
+                            "name": call.name,
+                            "arguments_preview": truncate_for_log(&call.arguments.to_string(), 220)
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[async_trait]

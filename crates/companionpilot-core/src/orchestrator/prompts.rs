@@ -52,6 +52,10 @@ pub(super) fn build_native_agent_system_prompt(
         "Use tools natively when needed. Prefer direct answers when tools are unnecessary.
 When you need current/news/price/weather/factual verification, call `web_search`.
 For Spotify operations, call `cli` using `spogo` commands only.
+Never call bare `spogo` without subcommand/flags. Use explicit forms like:
+- `spogo search track <query>`
+- `spogo status`
+- `spogo -h` (help when unsure)
 Use `current_datetime` when the request depends on current date/time context.
 If a durable user fact is stated or corrected, call `store_memory` with key/value/confidence.
 Do not emit pseudo tool-call markup in normal text responses."

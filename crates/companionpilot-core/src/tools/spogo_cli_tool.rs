@@ -75,6 +75,9 @@ fn validate_and_extract_spogo_args(command_args: Vec<String>) -> anyhow::Result<
             "CLI command contains disallowed shell syntax. Allowed usage is plain spogo args only."
         );
     }
+    if subcommand_args.is_empty() {
+        bail!("CLI command must include a spogo subcommand or flag. Use `spogo -h` for help.");
+    }
     Ok(subcommand_args.to_vec())
 }
 
@@ -170,6 +173,12 @@ mod tests {
     #[test]
     fn rejects_non_spogo_commands() {
         let args = vec!["ls".to_owned(), "-la".to_owned()];
+        assert!(validate_and_extract_spogo_args(args).is_err());
+    }
+
+    #[test]
+    fn rejects_bare_spogo_command() {
+        let args = vec!["spogo".to_owned()];
         assert!(validate_and_extract_spogo_args(args).is_err());
     }
 

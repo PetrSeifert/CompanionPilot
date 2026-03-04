@@ -19,16 +19,27 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string" },
+                    "command": { "type": "string", "minLength": 1 },
                     "args": {
                         "oneOf": [
-                            { "type": "array", "items": { "type": "string" } },
-                            { "type": "string" }
+                            {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "minItems": 1
+                            },
+                            {
+                                "type": "string",
+                                "minLength": 1
+                            }
                         ]
                     }
                 },
-                // Allow additional keys for forward-compatible CLI wrappers while sanitizer enforces safety.
-                "additionalProperties": true
+                // Restrict keys to command/args so provider models don't invent unsupported fields.
+                "anyOf": [
+                    { "required": ["command"] },
+                    { "required": ["args"] }
+                ],
+                "additionalProperties": false
             }),
         },
         ModelToolDefinition {
