@@ -114,20 +114,18 @@ fn parse_cli_args(args: &Value) -> anyhow::Result<Vec<String>> {
         Vec::new()
     };
 
-    let parsed = if !command_tokens.is_empty() {
-        // Some providers emit split payloads like {"command":"spogo","args":"status"}.
-        // Normalize that into canonical argv form.
-        if command_tokens.len() == 1 && command_tokens[0] == "spogo" && !args_tokens.is_empty() {
-            if args_tokens.first().map(String::as_str) == Some("spogo") {
-                args_tokens
-            } else {
-                let mut combined = command_tokens;
-                combined.extend(args_tokens);
-                combined
-            }
+    let parsed = if !command_tokens.is_empty() && !args_tokens.is_empty() {
+        // Some providers emit split payloads like {"command":"spogo search","args":"track muse"}.
+        // Normalize that into canonical argv form and preserve all provided args.
+        if args_tokens.first().map(String::as_str) == Some("spogo") {
+            args_tokens
         } else {
-            command_tokens
+            let mut combined = command_tokens;
+            combined.extend(args_tokens);
+            combined
         }
+    } else if !command_tokens.is_empty() {
+        command_tokens
     } else if !args_tokens.is_empty() {
         args_tokens
     } else {
@@ -184,6 +182,20 @@ mod tests {
     fn parses_split_command_and_args_payload() {
         let args = json!({ "command": "spogo", "args": "status" });
         let parsed = parse_cli_args(&args).expect("split payload should normalize");
+        assert_eq!(parsed, vec!["spogo", "status"]);
+    }
+
+    #[test]
+    fn preserves_split_command_and_args_tokens() {
+        let args = json!({ "command": "spogo search", "args": "track muse" });
+        let parsed = parse_cli_args(&args).expect("split payload should preserve args");
+        assert_eq!(parsed, vec!["spogo", "search", "track", "muse"]);
+    }
+
+    #[test]
+    fn prefers_args_when_it_contains_full_spogo_command() {
+        let args = json!({ "command": "spogo search", "args": "spogo status" });
+        let parsed = parse_cli_args(&args).expect("args should parse");
         assert_eq!(parsed, vec!["spogo", "status"]);
     }
 
