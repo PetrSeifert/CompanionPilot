@@ -176,6 +176,50 @@ impl ModelProvider for SkillSelectionContractModelProvider {
 }
 
 #[derive(Debug, Default)]
+struct InvalidToolCallThenFinalModelProvider;
+
+#[async_trait]
+impl ModelProvider for InvalidToolCallThenFinalModelProvider {
+    async fn complete(&self, request: ModelRequest) -> anyhow::Result<String> {
+        if request
+            .system_prompt
+            .contains("You are the skill selector for CompanionPilot.")
+        {
+            return Ok(json!({
+                "selected_skills": [],
+                "rationale": "invalid_tool_then_final_selector"
+            })
+            .to_string());
+        }
+        Ok("fallback synthesis".to_owned())
+    }
+
+    async fn complete_turn(&self, request: ModelTurnRequest) -> anyhow::Result<ModelTurnResponse> {
+        let saw_validation_feedback = request.messages.iter().any(|message| {
+            message.role == ModelMessageRole::User
+                && message
+                    .content
+                    .contains("Previous tool call arguments were invalid")
+        });
+        if saw_validation_feedback {
+            return Ok(ModelTurnResponse {
+                assistant_text: "Recovered after invalid tool call.".to_owned(),
+                tool_calls: Vec::new(),
+            });
+        }
+
+        Ok(ModelTurnResponse {
+            assistant_text: String::new(),
+            tool_calls: vec![ModelToolCall {
+                id: "bad-cli-call".to_owned(),
+                name: "cli".to_owned(),
+                arguments: json!({ "command": "spogo" }),
+            }],
+        })
+    }
+}
+
+#[derive(Debug, Default)]
 struct EmptyTurnModelProvider;
 
 #[async_trait]
@@ -411,6 +455,46 @@ async fn empty_native_turn_uses_direct_answer_fallback_instead_of_internal_error
 
     assert_eq!(result.text, "Direct fallback answer.");
     assert!(result.tool_calls.is_empty());
+}
+
+#[tokio::test]
+async fn invalid_tool_call_is_recovered_without_internal_error() {
+    let memory = Arc::new(InMemoryMemoryStore::default());
+    let orchestrator = DefaultChatOrchestrator::new(
+        Arc::new(InvalidToolCallThenFinalModelProvider),
+        memory.clone(),
+        Arc::new(ToolRegistry::default()),
+        empty_skill_catalog(),
+        SafetyPolicy::default(),
+    );
+
+    let result = orchestrator
+        .handle_message(MessageCtx {
+            message_id: "3e".into(),
+            user_id: "u3e".into(),
+            guild_id: "g1".into(),
+            channel_id: "c1".into(),
+            content: "what song is this?".into(),
+            timestamp: Utc::now(),
+        })
+        .await
+        .expect("invalid tool call recovery should complete");
+
+    assert_eq!(result.text, "Recovered after invalid tool call.");
+    assert!(result.tool_calls.is_empty());
+
+    let decisions = memory
+        .list_orchestration_decisions("u3e", 20)
+        .await
+        .expect("orchestration decisions should list");
+    assert!(
+        decisions.iter().any(|decision| {
+            decision.stage == "native_turn"
+                && decision.decision == "fallback"
+                && decision.rationale.contains("invalid_tool_calls")
+        }),
+        "invalid tool call fallback should be logged"
+    );
 }
 
 #[test]

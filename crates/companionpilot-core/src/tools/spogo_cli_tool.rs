@@ -1,4 +1,4 @@
-use anyhow::{Context, bail};
+use anyhow::bail;
 use serde_json::{Value, json};
 
 use super::{SpogoCli, ToolResult};
@@ -82,20 +82,20 @@ fn validate_and_extract_spogo_args(command_args: Vec<String>) -> anyhow::Result<
 }
 
 fn parse_cli_args(args: &Value) -> anyhow::Result<Vec<String>> {
-    let parsed = if let Some(command) = args
+    let command_tokens = args
         .get("command")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        command
-            .split_whitespace()
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>()
-    } else {
-        let raw = args
-            .get("args")
-            .context("cli requires `command` (string) or `args` (array<string> or string)")?;
+        .map(|command| {
+            command
+                .split_whitespace()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let args_tokens = if let Some(raw) = args.get("args") {
         match raw {
             Value::String(raw) => raw
                 .split_whitespace()
@@ -110,6 +110,28 @@ fn parse_cli_args(args: &Value) -> anyhow::Result<Vec<String>> {
                 .collect::<Vec<_>>(),
             _ => bail!("cli `args` must be array<string> or string"),
         }
+    } else {
+        Vec::new()
+    };
+
+    let parsed = if !command_tokens.is_empty() {
+        // Some providers emit split payloads like {"command":"spogo","args":"status"}.
+        // Normalize that into canonical argv form.
+        if command_tokens.len() == 1 && command_tokens[0] == "spogo" && !args_tokens.is_empty() {
+            if args_tokens.first().map(String::as_str) == Some("spogo") {
+                args_tokens
+            } else {
+                let mut combined = command_tokens;
+                combined.extend(args_tokens);
+                combined
+            }
+        } else {
+            command_tokens
+        }
+    } else if !args_tokens.is_empty() {
+        args_tokens
+    } else {
+        bail!("cli requires `command` (string) or `args` (array<string> or string)");
     };
 
     if parsed.is_empty() {
@@ -159,6 +181,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_split_command_and_args_payload() {
+        let args = json!({ "command": "spogo", "args": "status" });
+        let parsed = parse_cli_args(&args).expect("split payload should normalize");
+        assert_eq!(parsed, vec!["spogo", "status"]);
+    }
+
+    #[test]
     fn rejects_empty_args() {
         let args = json!({ "args": [] });
         assert!(parse_cli_args(&args).is_err());
@@ -193,6 +222,13 @@ mod tests {
         let raw = json!({ "command": "spogo -h" });
         let sanitized = sanitize_cli_invocation_args(&raw).expect("sanitization should pass");
         assert_eq!(sanitized, json!({ "args": ["spogo", "-h"] }));
+    }
+
+    #[test]
+    fn sanitize_cli_args_accepts_split_command_and_args_payload() {
+        let raw = json!({ "command": "spogo", "args": "status" });
+        let sanitized = sanitize_cli_invocation_args(&raw).expect("sanitization should pass");
+        assert_eq!(sanitized, json!({ "args": ["spogo", "status"] }));
     }
 
     #[test]

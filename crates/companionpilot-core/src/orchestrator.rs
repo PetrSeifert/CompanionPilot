@@ -190,6 +190,10 @@ impl DefaultChatOrchestrator {
                 tool_call_id: None,
                 tool_calls: raw_tool_calls,
             });
+            let raw_tool_call_count = conversation_messages
+                .last()
+                .map(|message| message.tool_calls.len())
+                .unwrap_or(0);
             let input_snapshot = build_turn_input_snapshot(
                 round,
                 &ctx.content,
@@ -202,16 +206,37 @@ impl DefaultChatOrchestrator {
                 round,
                 user_id = %ctx.user_id,
                 assistant_text_preview = %truncate_for_log(&assistant_text, 180),
-                raw_tool_call_count = conversation_messages
-                    .last()
-                    .map(|message| message.tool_calls.len())
-                    .unwrap_or(0),
+                raw_tool_call_count,
                 sanitized_tool_call_count = planned_tool_calls.len(),
                 model_input_snapshot_preview = %truncate_for_log(&input_snapshot.to_string(), 500),
                 "native turn input snapshot captured"
             );
 
             if planned_tool_calls.is_empty() {
+                if raw_tool_call_count > 0 {
+                    self.record_native_turn_decision(
+                        &ctx,
+                        round,
+                        &NativeTurnDecision::Fallback {
+                            reason: "invalid_tool_calls",
+                            error: Some(format!(
+                                "model requested {raw_tool_call_count} tool call(s) but none passed argument validation"
+                            )),
+                        },
+                        round_decision_ms,
+                    )
+                    .await;
+
+                    conversation_messages.push(ModelMessage {
+                        role: ModelMessageRole::User,
+                        content: "Previous tool call arguments were invalid and were not executed. Re-issue corrected tool calls or provide a direct final answer. For CLI usage, use command like `spogo status` or args array like [\"spogo\",\"status\"].".to_owned(),
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                    });
+                    continue;
+                }
+
                 self.record_native_turn_decision(
                     &ctx,
                     round,
@@ -240,14 +265,8 @@ impl DefaultChatOrchestrator {
                     tool_count: planned_tool_calls.len(),
                     payload: json!({
                         "assistant_text_preview": assistant_text,
-                        "raw_tool_call_count": conversation_messages
-                            .last()
-                            .map(|message| message.tool_calls.len())
-                            .unwrap_or(0),
-                        "dropped_tool_call_count": conversation_messages
-                            .last()
-                            .map(|message| message.tool_calls.len())
-                            .unwrap_or(0)
+                        "raw_tool_call_count": raw_tool_call_count,
+                        "dropped_tool_call_count": raw_tool_call_count
                             .saturating_sub(planned_tool_calls.len()),
                         "model_input_snapshot": input_snapshot,
                         "tool_calls": planned_tool_calls
