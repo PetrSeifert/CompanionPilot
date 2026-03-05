@@ -1,5 +1,13 @@
 FROM golang:1.24-bookworm AS spogo-builder
-RUN CGO_ENABLED=0 go install github.com/steipete/spogo/cmd/spogo@latest
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+ARG SPOGO_REPO=https://github.com/PetrSeifert/spogo.git
+ARG SPOGO_REF=main
+RUN git clone --depth 1 --branch ${SPOGO_REF} ${SPOGO_REPO} /tmp/spogo \
+    && cd /tmp/spogo \
+    && CGO_ENABLED=0 go build -o /go/bin/spogo ./cmd/spogo
 
 FROM rust:1.91.0-slim-bookworm AS builder
 WORKDIR /app
