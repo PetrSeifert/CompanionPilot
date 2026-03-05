@@ -137,14 +137,34 @@ impl DefaultChatOrchestrator {
             &selected_skills,
         );
         let tool_definitions = build_native_tool_definitions();
-        let mut conversation_messages = vec![ModelMessage {
+        let mut conversation_messages: Vec<ModelMessage> = memory_context
+            .recent_messages
+            .iter()
+            .filter_map(|msg| {
+                let (role_str, content) = msg.split_once(": ")?;
+                let role = match role_str {
+                    "user" => ModelMessageRole::User,
+                    "assistant" => ModelMessageRole::Assistant,
+                    _ => return None,
+                };
+                Some(ModelMessage {
+                    role,
+                    content: content.to_owned(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    reasoning: None,
+                })
+            })
+            .collect();
+        conversation_messages.push(ModelMessage {
             role: ModelMessageRole::User,
             content: ctx.content.clone(),
             name: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
             reasoning: None,
-        }];
+        });
 
         let mut native_reply_text: Option<String> = None;
 

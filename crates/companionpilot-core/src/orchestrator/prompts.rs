@@ -14,7 +14,19 @@ pub(super) fn build_skill_selector_prompt(
     memory: &MemoryContext,
     skill_metadata: &[SkillMetadata],
 ) -> String {
-    let context_block = build_context_block(memory);
+    let mut context_block = build_context_block(memory);
+    let recent_turns = build_recent_context_block(&memory.recent_messages);
+    if !recent_turns.is_empty() {
+        if context_block.is_empty() {
+            context_block = format!("Context:\n{recent_turns}\n");
+        } else {
+            // Insert before trailing newline of existing context block.
+            context_block.truncate(context_block.trim_end().len());
+            context_block.push('\n');
+            context_block.push_str(&recent_turns);
+            context_block.push('\n');
+        }
+    }
     let skill_inventory = build_skill_inventory_for_selector(skill_metadata);
 
     format!(
@@ -146,31 +158,11 @@ fn build_context_block(memory: &MemoryContext) -> String {
         context_lines.push(format!("Known user facts: {facts}"));
     }
 
-    if !memory.recent_messages.is_empty() {
-        context_lines.push(build_recent_context_block(&memory.recent_messages));
-    }
-
     if context_lines.is_empty() {
         String::new()
     } else {
         format!("Context:\n{}\n", context_lines.join("\n"))
     }
-}
-
-fn build_skill_inventory_for_selector(skill_metadata: &[SkillMetadata]) -> String {
-    let inventory = skill_metadata
-        .iter()
-        .map(|skill| {
-            json!({
-                "id": &skill.id,
-                "title": &skill.title,
-                "description": &skill.description,
-                "tags": &skill.tags,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    serde_json::to_string_pretty(&inventory).unwrap_or_else(|_| "[]".to_owned())
 }
 
 fn build_recent_context_block(recent_messages: &[String]) -> String {
@@ -190,3 +182,20 @@ fn build_recent_context_block(recent_messages: &[String]) -> String {
         .join("\n");
     format!("Recent conversation turns:\n{turns}")
 }
+
+fn build_skill_inventory_for_selector(skill_metadata: &[SkillMetadata]) -> String {
+    let inventory = skill_metadata
+        .iter()
+        .map(|skill| {
+            json!({
+                "id": &skill.id,
+                "title": &skill.title,
+                "description": &skill.description,
+                "tags": &skill.tags,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_string_pretty(&inventory).unwrap_or_else(|_| "[]".to_owned())
+}
+
