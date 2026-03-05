@@ -87,27 +87,23 @@ fn parse_cli_args(args: &Value) -> anyhow::Result<Vec<String>> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|command| {
-            command
-                .split_whitespace()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
+        .map(|command| shell_split(command))
+        .transpose()?
         .unwrap_or_default();
 
     let args_tokens = if let Some(raw) = args.get("args") {
         match raw {
-            Value::String(raw) => raw
-                .split_whitespace()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>(),
-            Value::Array(values) => values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>(),
+            Value::String(raw) => shell_split(raw)?,
+            Value::Array(values) => {
+                let elements: Vec<String> = values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+                fix_array_tokens(elements)?
+            }
             _ => bail!("cli `args` must be array<string> or string"),
         }
     } else {
@@ -140,6 +136,61 @@ fn parse_cli_args(args: &Value) -> anyhow::Result<Vec<String>> {
     }
 
     Ok(parsed)
+}
+
+/// Parse a shell-like string respecting double and single quoted regions.
+/// Quotes are stripped from the output; content inside quotes is preserved as one token.
+fn shell_split(s: &str) -> anyhow::Result<Vec<String>> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_double = false;
+    let mut in_single = false;
+
+    for c in s.chars() {
+        match c {
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            ' ' | '\t' | '\n' if !in_double && !in_single => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+
+    if in_double || in_single {
+        bail!("cli args contain an unclosed quote");
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
+}
+
+/// Fix array tokens where the AI mistakenly embedded shell quote characters into individual
+/// elements and split a quoted string across multiple elements.
+///
+/// For example: `["\"NEVER", "Neurosama\""]` → `["NEVER Neurosama"]`
+///
+/// When any element carries a leading or trailing quote character it means the AI was treating
+/// the array like a shell command string. In that case we rejoin all elements with spaces and
+/// re-parse using `shell_split`, which correctly reassembles the intended arguments.
+///
+/// When no element has embedded quotes the elements are returned verbatim, preserving any
+/// legitimate spaces inside an individual element (e.g. a device name like `"My Phone"`).
+fn fix_array_tokens(elements: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let has_embedded_quotes = elements.iter().any(|e| {
+        e.starts_with('"') || e.starts_with('\'') || e.ends_with('"') || e.ends_with('\'')
+    });
+
+    if has_embedded_quotes {
+        // Rejoin and let shell_split reassemble quoted spans correctly.
+        shell_split(&elements.join(" "))
+    } else {
+        Ok(elements)
+    }
 }
 
 fn has_disallowed_shell_syntax(token: &str) -> bool {
@@ -247,5 +298,93 @@ mod tests {
     fn sanitize_cli_args_rejects_non_spogo_command() {
         let raw = json!({ "command": "ls -la" });
         assert!(sanitize_cli_invocation_args(&raw).is_none());
+    }
+
+    // --- shell_split and fix_array_tokens ---
+
+    #[test]
+    fn shell_split_handles_double_quoted_multi_word() {
+        // "NEVER Neurosama" should be a single token, not two
+        let result = super::shell_split(
+            r#"spogo --json search track "NEVER Neurosama" --limit 1"#,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            vec!["spogo", "--json", "search", "track", "NEVER Neurosama", "--limit", "1"]
+        );
+    }
+
+    #[test]
+    fn shell_split_handles_single_quoted_multi_word() {
+        let result = super::shell_split("spogo --json search track 'NEVER Neurosama' --limit 1")
+            .unwrap();
+        assert_eq!(
+            result,
+            vec!["spogo", "--json", "search", "track", "NEVER Neurosama", "--limit", "1"]
+        );
+    }
+
+    #[test]
+    fn shell_split_errors_on_unclosed_quote() {
+        assert!(super::shell_split(r#"spogo search "unclosed"#).is_err());
+    }
+
+    #[test]
+    fn fix_array_tokens_rejoins_split_quoted_query() {
+        // Simulates: ["spogo", "--json", "search", "track", "\"NEVER", "Neurosama\"", "--limit", "1"]
+        let elements = vec![
+            "spogo".to_owned(),
+            "--json".to_owned(),
+            "search".to_owned(),
+            "track".to_owned(),
+            "\"NEVER".to_owned(),
+            "Neurosama\"".to_owned(),
+            "--limit".to_owned(),
+            "1".to_owned(),
+        ];
+        let result = super::fix_array_tokens(elements).unwrap();
+        assert_eq!(
+            result,
+            vec!["spogo", "--json", "search", "track", "NEVER Neurosama", "--limit", "1"]
+        );
+    }
+
+    #[test]
+    fn fix_array_tokens_preserves_clean_elements_with_spaces() {
+        // When no embedded quotes, elements with spaces are passed through verbatim
+        let elements = vec![
+            "spogo".to_owned(),
+            "--json".to_owned(),
+            "device".to_owned(),
+            "set".to_owned(),
+            "My Phone".to_owned(),
+        ];
+        let result = super::fix_array_tokens(elements.clone()).unwrap();
+        assert_eq!(result, elements);
+    }
+
+    #[test]
+    fn parse_cli_args_handles_quoted_string_form() {
+        let args = json!({
+            "args": r#"spogo --json search track "NEVER Neurosama" --limit 1"#
+        });
+        let parsed = parse_cli_args(&args).unwrap();
+        assert_eq!(
+            parsed,
+            vec!["spogo", "--json", "search", "track", "NEVER Neurosama", "--limit", "1"]
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_handles_split_quoted_array_form() {
+        let args = json!({
+            "args": ["spogo", "--json", "search", "track", "\"NEVER", "Neurosama\"", "--limit", "1"]
+        });
+        let parsed = parse_cli_args(&args).unwrap();
+        assert_eq!(
+            parsed,
+            vec!["spogo", "--json", "search", "track", "NEVER Neurosama", "--limit", "1"]
+        );
     }
 }
