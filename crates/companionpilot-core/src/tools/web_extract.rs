@@ -84,13 +84,26 @@ impl TavilyExtractTool {
             "tavily extract success"
         );
 
+        // Extract exists to return full page content, so per-page limits are generous.
+        // Aggregate cap prevents extreme output when many URLs are requested.
+        const PER_PAGE_CHARS: usize = 16_000;
+        const AGGREGATE_CHARS: usize = 80_000;
+
         let mut citations = Vec::new();
         let mut lines = Vec::new();
+        let mut total_chars: usize = 0;
 
         for item in response.results {
             citations.push(item.url.clone());
             let content = item.raw_content.unwrap_or_default();
-            let truncated = truncate_chars(&content, 2000);
+            let remaining = AGGREGATE_CHARS.saturating_sub(total_chars);
+            if remaining == 0 {
+                lines.push(format!("URL: {}\n(content omitted — aggregate limit reached)", item.url));
+                continue;
+            }
+            let limit = PER_PAGE_CHARS.min(remaining);
+            let truncated = truncate_chars(&content, limit);
+            total_chars += truncated.len();
             lines.push(format!("URL: {}\n{truncated}", item.url));
         }
 
