@@ -6,7 +6,7 @@ use serenity::{
     model::{
         channel::Message,
         gateway::{GatewayIntents, Ready},
-        id::GuildId,
+        id::{ChannelId, GuildId},
         prelude::VoiceState,
     },
     prelude::*,
@@ -60,8 +60,33 @@ impl Handler {
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         info!(user = %ready.user.name, "Discord gateway ready");
+
+        let runtime_settings = self.runtime_settings.get().await;
+        let allowed_channel_ids =
+            parse_allowed_channel_ids(&runtime_settings.discord_allowed_channel_ids);
+
+        for channel_id in &allowed_channel_ids {
+            let channel = ChannelId::new(*channel_id);
+            if let Err(error) = channel
+                .say(&ctx.http, "🟢 I'm online and ready!")
+                .await
+            {
+                warn!(
+                    %channel_id,
+                    ?error,
+                    "failed to send ready message to allowed channel"
+                );
+            }
+        }
+
+        if !allowed_channel_ids.is_empty() {
+            info!(
+                channel_count = allowed_channel_ids.len(),
+                "sent ready messages to allowed channels"
+            );
+        }
     }
 
     async fn cache_ready(&self, ctx: Context, guilds: Vec<GuildId>) {
