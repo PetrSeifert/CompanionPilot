@@ -63,17 +63,17 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
                     "max_results": { "type": "integer", "minimum": 1, "maximum": 20 },
                     "search_depth": {
                         "type": "string",
-                        "enum": ["basic", "advanced"],
-                        "description": "Search depth: 'basic' is fast, 'advanced' is slower but more thorough."
+                        "enum": ["basic", "advanced", "fast", "ultra-fast"],
+                        "description": "Search depth: 'fast'/'basic' are quick, 'advanced' is slower but more thorough, 'ultra-fast' is lowest latency."
                     },
                     "topic": {
                         "type": "string",
-                        "enum": ["general", "news"],
+                        "enum": ["general", "news", "finance"],
                         "description": "Category filter for search results."
                     },
                     "time_range": {
                         "type": "string",
-                        "enum": ["day", "week", "month", "year"],
+                        "enum": ["day", "week", "month", "year", "d", "w", "m", "y"],
                         "description": "Filter results by recency."
                     },
                     "include_domains": {
@@ -94,6 +94,119 @@ pub(super) fn build_native_tool_definitions() -> Vec<ModelToolDefinition> {
                     }
                 },
                 "required": ["query", "reasoning"],
+                "additionalProperties": false
+            }),
+        },
+        ModelToolDefinition {
+            name: "web_extract".to_owned(),
+            description: "Extract clean content from specific URLs.".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "urls": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "description": "URLs to extract content from (max 20)."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional query to rerank extracted chunks by relevance."
+                    },
+                    "extract_depth": {
+                        "type": "string",
+                        "enum": ["basic", "advanced"],
+                        "description": "'basic' for simple pages, 'advanced' for JS-rendered pages."
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
+                },
+                "required": ["urls", "reasoning"],
+                "additionalProperties": false
+            }),
+        },
+        ModelToolDefinition {
+            name: "web_crawl".to_owned(),
+            description: "Crawl a website to extract content from multiple pages.".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Root URL to begin crawling."
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "description": "Levels deep to crawl (1-5)."
+                    },
+                    "max_breadth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "description": "Max links to follow per page (1-500)."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "description": "Total pages cap (1-500)."
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "Natural language guidance to focus the crawl."
+                    },
+                    "extract_depth": {
+                        "type": "string",
+                        "enum": ["basic", "advanced"],
+                        "description": "'basic' for simple pages, 'advanced' for JS-rendered pages."
+                    },
+                    "select_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": 20,
+                        "description": "Regex patterns for paths to include."
+                    },
+                    "exclude_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": 20,
+                        "description": "Regex patterns for paths to exclude."
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
+                },
+                "required": ["url", "reasoning"],
+                "additionalProperties": false
+            }),
+        },
+        ModelToolDefinition {
+            name: "web_research".to_owned(),
+            description: "Conduct comprehensive research on a topic with automatic source gathering and AI synthesis.".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "Research topic or question."
+                    },
+                    "model": {
+                        "type": "string",
+                        "enum": ["mini", "pro", "auto"],
+                        "description": "'mini' for quick single-topic, 'pro' for comprehensive multi-angle, 'auto' lets API choose."
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this tool is needed for the user's request."
+                    }
+                },
+                "required": ["input", "reasoning"],
                 "additionalProperties": false
             }),
         },

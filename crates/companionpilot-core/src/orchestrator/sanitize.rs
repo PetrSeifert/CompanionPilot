@@ -74,13 +74,13 @@ fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCal
                 .get("search_depth")
                 .and_then(Value::as_str)
             {
-                if matches!(depth, "basic" | "advanced") {
+                if matches!(depth, "basic" | "advanced" | "fast" | "ultra-fast") {
                     args["search_depth"] = json!(depth);
                 }
             }
 
             if let Some(topic) = raw_call.arguments.get("topic").and_then(Value::as_str) {
-                if matches!(topic, "general" | "news") {
+                if matches!(topic, "general" | "news" | "finance") {
                     args["topic"] = json!(topic);
                 }
             }
@@ -90,7 +90,7 @@ fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCal
                 .get("time_range")
                 .and_then(Value::as_str)
             {
-                if matches!(range, "day" | "week" | "month" | "year") {
+                if matches!(range, "day" | "week" | "month" | "year" | "d" | "w" | "m" | "y") {
                     args["time_range"] = json!(range);
                 }
             }
@@ -117,6 +117,155 @@ fn sanitize_native_tool_call(raw_call: ModelToolCall) -> Option<SanitizedToolCal
 
             ToolCall {
                 tool_name: "web_search".to_owned(),
+                args,
+            }
+        }
+        "web_extract" => {
+            let urls: Vec<String> = raw_call
+                .arguments
+                .get("urls")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .take(20)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if urls.is_empty() {
+                debug!("dropping native web_extract call with empty urls");
+                return None;
+            }
+
+            let mut args = json!({ "urls": urls });
+
+            if let Some(query) = raw_call
+                .arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args["query"] = json!(query);
+            }
+
+            if let Some(depth) = raw_call
+                .arguments
+                .get("extract_depth")
+                .and_then(Value::as_str)
+            {
+                if matches!(depth, "basic" | "advanced") {
+                    args["extract_depth"] = json!(depth);
+                }
+            }
+
+            ToolCall {
+                tool_name: "web_extract".to_owned(),
+                args,
+            }
+        }
+        "web_crawl" => {
+            let url = raw_call
+                .arguments
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if url.is_empty() {
+                debug!("dropping native web_crawl call with empty url");
+                return None;
+            }
+
+            let mut args = json!({ "url": url });
+
+            if let Some(depth) = raw_call.arguments.get("max_depth").and_then(Value::as_u64) {
+                args["max_depth"] = json!(depth.clamp(1, 5));
+            }
+            if let Some(breadth) = raw_call
+                .arguments
+                .get("max_breadth")
+                .and_then(Value::as_u64)
+            {
+                args["max_breadth"] = json!(breadth.clamp(1, 500));
+            }
+            if let Some(limit) = raw_call.arguments.get("limit").and_then(Value::as_u64) {
+                args["limit"] = json!(limit.clamp(1, 500));
+            }
+
+            if let Some(instructions) = raw_call
+                .arguments
+                .get("instructions")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args["instructions"] = json!(instructions);
+            }
+
+            if let Some(depth) = raw_call
+                .arguments
+                .get("extract_depth")
+                .and_then(Value::as_str)
+            {
+                if matches!(depth, "basic" | "advanced") {
+                    args["extract_depth"] = json!(depth);
+                }
+            }
+
+            let extract_path_list = |key: &str| -> Option<Vec<String>> {
+                let arr = raw_call.arguments.get(key)?.as_array()?;
+                let paths: Vec<String> = arr
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .take(20)
+                    .map(ToOwned::to_owned)
+                    .collect();
+                if paths.is_empty() { None } else { Some(paths) }
+            };
+
+            if let Some(paths) = extract_path_list("select_paths") {
+                args["select_paths"] = json!(paths);
+            }
+            if let Some(paths) = extract_path_list("exclude_paths") {
+                args["exclude_paths"] = json!(paths);
+            }
+
+            ToolCall {
+                tool_name: "web_crawl".to_owned(),
+                args,
+            }
+        }
+        "web_research" => {
+            let input = raw_call
+                .arguments
+                .get("input")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if input.is_empty() {
+                debug!("dropping native web_research call with empty input");
+                return None;
+            }
+
+            let mut args = json!({ "input": input });
+
+            if let Some(model) = raw_call
+                .arguments
+                .get("model")
+                .and_then(Value::as_str)
+            {
+                if matches!(model, "mini" | "pro" | "auto") {
+                    args["model"] = json!(model);
+                }
+            }
+
+            ToolCall {
+                tool_name: "web_research".to_owned(),
                 args,
             }
         }

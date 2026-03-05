@@ -1,6 +1,9 @@
 mod current_datetime;
 mod spogo_cli;
 mod spogo_cli_tool;
+mod web_crawl;
+mod web_extract;
+mod web_research;
 mod web_search;
 
 use std::sync::Arc;
@@ -14,6 +17,9 @@ pub use current_datetime::CurrentDateTimeTool;
 pub use spogo_cli::{DEFAULT_SPOGO_BIN_PATH, DEFAULT_SPOGO_TIMEOUT_MS, SpogoCli};
 pub use spogo_cli_tool::CliTool;
 pub(crate) use spogo_cli_tool::sanitize_cli_invocation_args;
+pub use web_crawl::TavilyCrawlTool;
+pub use web_extract::TavilyExtractTool;
+pub use web_research::TavilyResearchTool;
 pub use web_search::TavilyWebSearchTool;
 
 #[derive(Debug, Clone)]
@@ -37,6 +43,9 @@ pub struct ToolRegistry {
     pub current_datetime: CurrentDateTimeTool,
     pub cli: CliTool,
     pub web_search: Option<TavilyWebSearchTool>,
+    pub web_extract: Option<TavilyExtractTool>,
+    pub web_crawl: Option<TavilyCrawlTool>,
+    pub web_research: Option<TavilyResearchTool>,
     pub voice: Option<Arc<VoiceManager>>,
 }
 
@@ -58,6 +67,27 @@ impl ToolExecutor for ToolRegistry {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("web_search tool is not configured"))?;
                 tool.search(args).await
+            }
+            "web_extract" => {
+                let tool = self
+                    .web_extract
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("web_extract tool is not configured"))?;
+                tool.extract(args).await
+            }
+            "web_crawl" => {
+                let tool = self
+                    .web_crawl
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("web_crawl tool is not configured"))?;
+                tool.crawl(args).await
+            }
+            "web_research" => {
+                let tool = self
+                    .web_research
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("web_research tool is not configured"))?;
+                tool.research(args).await
             }
             "discord_voice_join" => {
                 let manager = self

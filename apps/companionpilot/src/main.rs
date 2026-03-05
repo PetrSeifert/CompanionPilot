@@ -14,7 +14,8 @@ use companionpilot_core::{
     safety::SafetyPolicy,
     skills::SkillCatalog,
     tools::{
-        CliTool, CurrentDateTimeTool, SpogoCli, TavilyWebSearchTool, ToolExecutor, ToolRegistry,
+        CliTool, CurrentDateTimeTool, SpogoCli, TavilyCrawlTool, TavilyExtractTool,
+        TavilyResearchTool, TavilyWebSearchTool, ToolExecutor, ToolRegistry,
     },
     voice::{VoiceManager, VoiceRuntimeConfig},
 };
@@ -153,6 +154,18 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
         .tavily_api_key
         .as_ref()
         .map(|key| TavilyWebSearchTool::new(key.clone()));
+    let web_extract = config
+        .tavily_api_key
+        .as_ref()
+        .map(|key| TavilyExtractTool::new(key.clone()));
+    let web_crawl = config
+        .tavily_api_key
+        .as_ref()
+        .map(|key| TavilyCrawlTool::new(key.clone()));
+    let web_research = config
+        .tavily_api_key
+        .as_ref()
+        .map(|key| TavilyResearchTool::new(key.clone()));
     let spogo_cli = SpogoCli::new(
         config.spogo_bin_path.clone(),
         config.spogo_config_dir.clone(),
@@ -171,6 +184,9 @@ fn build_tools(config: &AppConfig, voice: Option<Arc<VoiceManager>>) -> Arc<dyn 
         current_datetime: CurrentDateTimeTool,
         cli: cli_tool,
         web_search,
+        web_extract,
+        web_crawl,
+        web_research,
         voice,
     })
 }

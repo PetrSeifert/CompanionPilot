@@ -1,40 +1,115 @@
 ---
 id: tavily-research
-title: Tavily Multi-Step Research
-description: Chain multiple web_search calls for deep research with verification and synthesis.
+title: Tavily Research
+description: Comprehensive research grounded in web data with explicit citations. Use when you need multi-source synthesis — comparisons, current events, market analysis, detailed reports.
 tags: [tavily, research, strategy]
 ---
 
-# Multi-step research strategy
+# Research
 
-When a question requires depth, use multiple `web_search` calls in sequence.
+Conduct comprehensive research on any topic with automatic source gathering, analysis, and response generation with citations.
 
-## Broad-then-narrow pattern
+## Quick Start
 
-1. **Broad scan** — `web_search` with a general query, `max_results: 8-10`
-2. **Targeted follow-up** — refine the query using terms from step 1, `search_depth: "advanced"`
-3. **Verification** — search for contradicting or confirming evidence with different keywords
-
-## Using execute_program for chained searches
+### Using the `web_research` tool (preferred)
 
 ```json
+// Quick research
 {
-  "tool_name": "execute_program",
+  "tool_name": "web_research",
   "arguments": {
-    "steps": [
-      { "step_id": "broad", "tool_name": "web_search", "arguments": { "query": "topic overview", "max_results": 8 } },
-      { "step_id": "deep", "tool_name": "web_search", "arguments": { "query": "topic specific detail", "search_depth": "advanced", "max_results": 5 } }
-    ]
+    "input": "quantum computing trends",
+    "reasoning": "Research quantum computing developments"
+  }
+}
+
+// Comprehensive analysis with pro model
+{
+  "tool_name": "web_research",
+  "arguments": {
+    "input": "AI agents comparison: LangChain vs CrewAI vs AutoGen",
+    "model": "pro",
+    "reasoning": "Deep comparison of AI agent frameworks"
   }
 }
 ```
 
-## Verification techniques
+Research can take 30-120 seconds. The tool handles polling automatically.
 
-- Search the same fact with different phrasing
-- Use `include_domains` to check primary sources (official docs, .gov, .edu)
-- Use `topic: "news"` to find the latest reporting on evolving stories
+### Alternative: Using the script
 
-## Synthesis
+```bash
+./skills/scripts/tavily-research.sh '{"input": "quantum computing trends"}'
+./skills/scripts/tavily-research.sh '{"input": "AI agents comparison", "model": "pro"}'
+```
 
-After gathering results, cross-reference claims across sources. Flag conflicting information and prefer primary sources over aggregators.
+### Alternative: Using curl
+
+```bash
+# Start research task
+curl -s --request POST \
+  --url https://api.tavily.com/research \
+  --header "Authorization: Bearer $TAVILY_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --data '{"input": "quantum computing trends", "model": "pro"}'
+
+# Poll for results (using request_id from response)
+curl -s --request GET \
+  --url "https://api.tavily.com/research/<request_id>" \
+  --header "Authorization: Bearer $TAVILY_API_KEY"
+```
+
+## API Reference
+
+### Endpoint
+
+```
+POST https://api.tavily.com/research
+GET  https://api.tavily.com/research/<request_id>
+```
+
+### Request Body
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `input` | string | Required | Research topic or question |
+| `model` | string | `"auto"` | `"mini"`, `"pro"`, `"auto"` |
+
+### Model Selection
+
+| Model | Use Case | Speed |
+|-------|----------|-------|
+| `mini` | Single topic, targeted research | ~30s |
+| `pro` | Comprehensive multi-angle analysis | ~60-120s |
+| `auto` | API chooses based on complexity | Varies |
+
+**Rule of thumb:** "what does X do?" -> mini. "X vs Y vs Z" or "best way to..." -> pro.
+
+### Response Format
+
+```json
+{
+  "status": "completed",
+  "content": "# Research Report\n\n...",
+  "sources": [
+    { "url": "https://example.com", "title": "Source Title", "citation": "[1]" }
+  ],
+  "response_time": 45.2
+}
+```
+
+## Multi-Step Research Strategy
+
+When using `web_search` calls instead of the research API:
+
+1. **Broad scan** — general query, `max_results: 8-10`
+2. **Targeted follow-up** — refine using terms from step 1, `search_depth: "advanced"`
+3. **Verification** — search with different keywords, `include_domains` for primary sources
+
+## Tips
+
+- **Be specific in prompts** — include known details: target market, competitors, constraints
+- **Share prior context** — include what you already know to avoid repetition
+- **Use `topic: "news"` in web_search** for evolving stories
+- **Use `topic: "finance"` in web_search** for market/financial data
+- **Cross-reference claims** across sources; prefer primary sources over aggregators

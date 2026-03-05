@@ -908,8 +908,8 @@ fn web_search_invalid_enums_are_silently_dropped() {
         name: "web_search".to_owned(),
         arguments: json!({
             "query": "test",
-            "search_depth": "ultra-fast",
-            "topic": "finance",
+            "search_depth": "turbo",
+            "topic": "sports",
             "time_range": "century",
             "reasoning": "test"
         }),
@@ -999,4 +999,290 @@ fn web_search_max_results_clamps_to_20() {
     }]);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].call.args["max_results"], 20);
+}
+
+// ── web_extract sanitization ──
+
+#[test]
+fn web_extract_valid_urls_pass_through() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "we-1".to_owned(),
+        name: "web_extract".to_owned(),
+        arguments: json!({
+            "urls": ["https://example.com/a", "https://example.com/b"],
+            "query": "test query",
+            "extract_depth": "advanced",
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["urls"], json!(["https://example.com/a", "https://example.com/b"]));
+    assert_eq!(args["query"], "test query");
+    assert_eq!(args["extract_depth"], "advanced");
+}
+
+#[test]
+fn web_extract_empty_urls_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "we-2".to_owned(),
+        name: "web_extract".to_owned(),
+        arguments: json!({
+            "urls": [],
+            "reasoning": "test"
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn web_extract_blank_urls_filtered_and_dropped_if_none_remain() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "we-3".to_owned(),
+        name: "web_extract".to_owned(),
+        arguments: json!({
+            "urls": ["", "  "],
+            "reasoning": "test"
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn web_extract_invalid_extract_depth_silently_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "we-4".to_owned(),
+        name: "web_extract".to_owned(),
+        arguments: json!({
+            "urls": ["https://example.com"],
+            "extract_depth": "turbo",
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].call.args.get("extract_depth").is_none());
+}
+
+#[test]
+fn web_extract_urls_capped_at_20() {
+    let urls: Vec<String> = (0..25)
+        .map(|i| format!("https://example.com/{i}"))
+        .collect();
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "we-5".to_owned(),
+        name: "web_extract".to_owned(),
+        arguments: json!({
+            "urls": urls,
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].call.args["urls"].as_array().unwrap().len(), 20);
+}
+
+// ── web_crawl sanitization ──
+
+#[test]
+fn web_crawl_valid_url_passes_through() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wc-1".to_owned(),
+        name: "web_crawl".to_owned(),
+        arguments: json!({
+            "url": "https://docs.example.com",
+            "max_depth": 2,
+            "max_breadth": 10,
+            "limit": 50,
+            "instructions": "find API docs",
+            "extract_depth": "basic",
+            "select_paths": ["/api/.*"],
+            "exclude_paths": ["/blog/.*"],
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["url"], "https://docs.example.com");
+    assert_eq!(args["max_depth"], 2);
+    assert_eq!(args["max_breadth"], 10);
+    assert_eq!(args["limit"], 50);
+    assert_eq!(args["instructions"], "find API docs");
+    assert_eq!(args["extract_depth"], "basic");
+    assert_eq!(args["select_paths"], json!(["/api/.*"]));
+    assert_eq!(args["exclude_paths"], json!(["/blog/.*"]));
+}
+
+#[test]
+fn web_crawl_empty_url_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wc-2".to_owned(),
+        name: "web_crawl".to_owned(),
+        arguments: json!({
+            "url": "",
+            "reasoning": "test"
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn web_crawl_missing_url_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wc-3".to_owned(),
+        name: "web_crawl".to_owned(),
+        arguments: json!({
+            "reasoning": "test"
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn web_crawl_depth_breadth_limit_clamped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wc-4".to_owned(),
+        name: "web_crawl".to_owned(),
+        arguments: json!({
+            "url": "https://example.com",
+            "max_depth": 100,
+            "max_breadth": 9999,
+            "limit": 0,
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["max_depth"], 5);
+    assert_eq!(args["max_breadth"], 500);
+    assert_eq!(args["limit"], 1);
+}
+
+#[test]
+fn web_crawl_path_arrays_filter_empty_and_cap() {
+    let paths: Vec<String> = (0..25)
+        .map(|i| format!("/path/{i}"))
+        .collect();
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wc-5".to_owned(),
+        name: "web_crawl".to_owned(),
+        arguments: json!({
+            "url": "https://example.com",
+            "select_paths": paths,
+            "exclude_paths": ["", "  ", "/valid/.*"],
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["select_paths"].as_array().unwrap().len(), 20);
+    let exclude = args["exclude_paths"].as_array().unwrap();
+    assert_eq!(exclude.len(), 1);
+    assert_eq!(exclude[0], "/valid/.*");
+}
+
+#[test]
+fn web_crawl_empty_path_arrays_omitted() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wc-6".to_owned(),
+        name: "web_crawl".to_owned(),
+        arguments: json!({
+            "url": "https://example.com",
+            "select_paths": ["", "  "],
+            "exclude_paths": [],
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert!(args.get("select_paths").is_none());
+    assert!(args.get("exclude_paths").is_none());
+}
+
+#[test]
+fn web_crawl_invalid_extract_depth_silently_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wc-7".to_owned(),
+        name: "web_crawl".to_owned(),
+        arguments: json!({
+            "url": "https://example.com",
+            "extract_depth": "deep",
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].call.args.get("extract_depth").is_none());
+}
+
+// ── web_research sanitization ──
+
+#[test]
+fn web_research_valid_input_passes_through() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wr-1".to_owned(),
+        name: "web_research".to_owned(),
+        arguments: json!({
+            "input": "quantum computing trends",
+            "model": "pro",
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["input"], "quantum computing trends");
+    assert_eq!(args["model"], "pro");
+}
+
+#[test]
+fn web_research_empty_input_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wr-2".to_owned(),
+        name: "web_research".to_owned(),
+        arguments: json!({
+            "input": "",
+            "reasoning": "test"
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn web_research_whitespace_input_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wr-3".to_owned(),
+        name: "web_research".to_owned(),
+        arguments: json!({
+            "input": "   ",
+            "reasoning": "test"
+        }),
+    }]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn web_research_invalid_model_silently_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wr-4".to_owned(),
+        name: "web_research".to_owned(),
+        arguments: json!({
+            "input": "test topic",
+            "model": "ultra",
+            "reasoning": "test"
+        }),
+    }]);
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].call.args;
+    assert_eq!(args["input"], "test topic");
+    assert!(args.get("model").is_none());
+}
+
+#[test]
+fn web_research_missing_input_dropped() {
+    let calls = sanitize_native_tool_calls(vec![ModelToolCall {
+        id: "wr-5".to_owned(),
+        name: "web_research".to_owned(),
+        arguments: json!({
+            "model": "mini",
+            "reasoning": "test"
+        }),
+    }]);
+    assert!(calls.is_empty());
 }

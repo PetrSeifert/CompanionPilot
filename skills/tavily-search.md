@@ -1,34 +1,118 @@
 ---
 id: tavily-search
 title: Tavily Web Search
-description: Optimize web_search tool usage with query crafting, parameter selection, and domain filtering.
+description: Search the web using Tavily's LLM-optimized search API. Returns relevant results with content snippets, scores, and metadata.
 tags: [tavily, search, web]
 ---
 
-# web_search usage
+# Search
 
-Use `web_search` for real-time factual queries. Craft concise, keyword-rich queries.
+Search the web and get relevant results optimized for LLM consumption.
 
-## Parameters
+## Quick Start
 
-| Param | Default | When to use |
-|---|---|---|
-| `query` | (required) | Keywords, not full sentences |
-| `max_results` | 5 | Raise to 10-15 for broad topics, lower to 2-3 for precise lookups |
-| `search_depth` | basic | Use `advanced` for complex/technical topics needing deeper results |
-| `topic` | general | Use `news` for current events, press releases, breaking stories |
-| `time_range` | (none) | `day` for breaking news, `week`/`month` for recent developments |
-| `include_domains` | (none) | Lock to trusted sources, e.g. `["docs.python.org","stackoverflow.com"]` |
-| `exclude_domains` | (none) | Filter out low-quality or paywalled sites |
+### Using the web_search tool (preferred)
 
-## Query tips
+The `web_search` tool calls Tavily search directly. No setup needed.
 
-- Lead with the most specific noun: `"Rust async trait 2024"` not `"how do async traits work in Rust"`
-- Add version/year when relevant: `"React 19 server components"`
-- For comparisons, name both: `"PostgreSQL vs MySQL JSON performance"`
-- Use quotes inside the query for exact phrases: `"segmentation fault" mmap`
+```json
+{
+  "tool_name": "web_search",
+  "arguments": {
+    "query": "latest developments in quantum computing",
+    "max_results": 10,
+    "search_depth": "advanced"
+  }
+}
+```
 
-## Domain filtering examples
+### Using the script
 
-- Official docs only: `include_domains: ["docs.rs","doc.rust-lang.org"]`
-- Exclude social media: `exclude_domains: ["reddit.com","twitter.com","x.com"]`
+```bash
+./skills/scripts/tavily-search.sh '{"query": "AI news", "time_range": "week", "max_results": 10}'
+```
+
+**More examples:**
+```bash
+# Domain-filtered search
+./skills/scripts/tavily-search.sh '{"query": "machine learning", "include_domains": ["arxiv.org", "github.com"], "search_depth": "advanced"}'
+
+# News search
+./skills/scripts/tavily-search.sh '{"query": "tech industry layoffs", "topic": "news", "time_range": "day"}'
+
+# Finance search
+./skills/scripts/tavily-search.sh '{"query": "NVIDIA earnings Q4", "topic": "finance"}'
+```
+
+### Using curl
+
+```bash
+curl -s --request POST \
+  --url https://api.tavily.com/search \
+  --header "Authorization: Bearer $TAVILY_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --data '{"query": "latest developments in quantum computing", "max_results": 5}'
+```
+
+## API Reference
+
+### Endpoint
+
+```
+POST https://api.tavily.com/search
+```
+
+### Request Body
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `query` | string | Required | Search query (keep under 400 chars) |
+| `max_results` | integer | 5 | Maximum results (0-20) |
+| `search_depth` | string | `"basic"` | `"ultra-fast"`, `"fast"`, `"basic"`, `"advanced"` |
+| `topic` | string | `"general"` | `"general"`, `"news"`, `"finance"` |
+| `time_range` | string | null | `"day"`, `"week"`, `"month"`, `"year"` |
+| `include_domains` | array | [] | Domains to include (max 300) |
+| `exclude_domains` | array | [] | Domains to exclude (max 150) |
+| `include_answer` | bool | false | Generate LLM answer summary |
+| `include_raw_content` | bool/string | false | Include full page content (`true`, `"markdown"`, `"text"`) |
+| `include_images` | bool | false | Include image results |
+
+### Response Format
+
+```json
+{
+  "query": "latest developments in quantum computing",
+  "results": [
+    {
+      "title": "Page Title",
+      "url": "https://example.com/page",
+      "content": "Extracted text snippet...",
+      "score": 0.85
+    }
+  ],
+  "response_time": 1.2
+}
+```
+
+## Search Depth
+
+| Depth | Latency | Relevance | Content Type |
+|-------|---------|-----------|--------------|
+| `ultra-fast` | Lowest | Lower | NLP summary |
+| `fast` | Low | Good | Chunks |
+| `basic` | Medium | High | NLP summary |
+| `advanced` | Higher | Highest | Chunks |
+
+**When to use each:**
+- `ultra-fast`: Real-time chat, simple fact lookups
+- `fast`: Need chunks but latency matters
+- `basic`: General-purpose, balanced
+- `advanced`: Precision matters, complex/technical topics
+
+## Tips
+
+- **Keep queries under 400 characters** — think search query, not prompt
+- **Break complex queries into sub-queries** — better results than one massive query
+- **Use `include_domains`** to focus on trusted sources
+- **Use `time_range`** for recent information
+- **Filter by `score`** (0-1) to get highest relevance results
